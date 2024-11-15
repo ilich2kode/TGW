@@ -1,0 +1,26 @@
+{% extends 'main/base.html' %}
+
+{% block content %}
+<h1>Список чатов и каналов</h1>
+
+<table class="table">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Выбрать</th>
+            <th>Название</th>
+            <th>ID</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for chat in chat_list %}
+        <tr>
+            <td>{{ chat.index }}</td>
+            <td><input type="checkbox" name="chat" value="{{ chat.id }}"></td>
+            <td>{{ chat.title }}</td>
+            <td>{{ chat.id }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
