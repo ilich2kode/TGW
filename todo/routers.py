@@ -56,3 +56,4 @@ async def delete(todo_id: int, db_session: AsyncSession = Depends(get_db)):
         await db_session.delete(todo)
         await db_session.commit()
     return RedirectResponse(url=router.url_path_for('home'), status_code=302)
+

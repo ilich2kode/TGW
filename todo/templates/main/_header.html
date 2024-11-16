@@ -12,12 +12,12 @@
 
 
   <div class="text-end">
-    {#{% if current_user.is_authenticated %}#}
-    <span> Добро пожаловать, {#{{ current_user.login }} #}</span>
-      <a href="#" class="btn btn-outline-light me-2">Выйти</a>
-      {# {% else %}#}
-      <a href="{{ url_for('login') }}" class="btn btn-outline-light me-2">Войти</a>
-      <a href="{{ url_for('register') }}" class="btn btn-warning">Регистрация</a>
-      {#{% endif %}#}
-  </div>
+    {% if is_authenticated %}
+    <a href="{{ url_for('logout') }}" class="btn btn-outline-light me-2">Выйти</a>
+    {% else %}
+    <span>Добро пожаловать!</span>
+    <a href="{{ url_for('login') }}" class="btn btn-outline-light me-2">Войти</a>
+    <a href="{{ url_for('register') }}" class="btn btn-warning">Регистрация</a>
+    {% endif %}
+</div>
 </div>
