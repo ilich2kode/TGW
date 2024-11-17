@@ -4,7 +4,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
 import os
-from todo.routers import router
 from todo.pyrog.tgbot import tg_router
 
 app = FastAPI()
@@ -26,7 +25,6 @@ app.mount('/static', StaticFiles(directory=static_dir), name='static')
 templates = Jinja2Templates(directory='todo/templates')  # Создайте экземпляр Jinja2Templates
 
 # Импортируйте роутеры после создания экземпляра приложения
-app.include_router(router)
 app.include_router(tg_router) # Включите router в ваше приложение
 
 # Пример маршрута

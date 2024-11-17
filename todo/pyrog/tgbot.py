@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Form
+from fastapi import APIRouter, Request, Form, Response
 from pyrogram import Client
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeExpired, FloodWait
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -6,6 +6,7 @@ from fastapi.templating import Jinja2Templates
 import os
 import logging
 from dotenv import load_dotenv
+from itsdangerous import URLSafeSerializer
 
 # Настройка логирования
 logging.basicConfig(level=logging.ERROR)
@@ -13,6 +14,9 @@ logger = logging.getLogger(__name__)
 
 # Загрузка переменных из файла .env
 load_dotenv()
+
+SECRET_KEY = "7632972461643986eqwqewq1231231"  # Замените на свой секретный ключ
+serializer = URLSafeSerializer(SECRET_KEY)
 
 tg_router = APIRouter()
 templates = Jinja2Templates(directory='todo/templates')
@@ -24,7 +28,6 @@ session_directory = os.getcwd()  # Используем текущий рабо�
 api_id = os.getenv("API_ID")
 api_hash = os.getenv("API_HASH")
 client_data = {}
-is_authenticated = False
 
 # Функция для создания клиента с сессией на диске
 def create_client():
@@ -36,8 +39,8 @@ def create_client():
 
 # Новый роут для входа с использованием существующей сессии
 @tg_router.get("/login", response_class=HTMLResponse, name="login")
-async def login():
-    global client, is_authenticated
+async def login(response: Response):
+    global client
 
     # Проверяем, существует ли файл сессии
     session_path = os.path.join(session_directory, f"{session_name}.session")
@@ -51,19 +54,15 @@ async def login():
     try:
         # Подключаемся используя существующую сессию
         await client.connect()
-        try:
-            # Проверяем, авторизован ли клиент
-            user = await client.get_me()
-            if user:
-                is_authenticated = True
-            else:
-                is_authenticated = False
-        except Exception as e:
-            logger.error(f"Ошибка при проверке авторизации: {e}")
-            return JSONResponse(content={"status": "Ошибка при проверке авторизации. Пожалуйста, выполните авторизацию заново."}, status_code=400)
-
-        # Перенаправляем на страницу успешного входа
-        return RedirectResponse(url="/success", status_code=303)
+        user = await client.get_me()
+        if user:
+            # Устанавливаем куки для авторизованного пользователя
+            auth_token = serializer.dumps({"authenticated": True})
+            response = RedirectResponse(url="/success", status_code=303)
+            response.set_cookie(key="auth_token", value=auth_token)
+            return response
+        else:
+            return JSONResponse(content={"status": "Сессия не авторизована. Пожалуйста, выполните авторизацию заново."}, status_code=400)
     except Exception as e:
         logger.error(f"Ошибка при подключении с использованием сессии: {e}")
         return JSONResponse(content={"status": f"Ошибка при подключении с использованием сессии: {str(e)}"}, status_code=500)
@@ -108,7 +107,7 @@ async def send_code(request: Request):
 # Роут для подтверждения кода и завершения авторизации
 @tg_router.post("/verify_code", response_class=HTMLResponse)
 async def verify_code(request: Request):
-    global client_data, is_authenticated
+    global client_data
     form = await request.form()
     phone = form.get("phone")
     code = form.get("code")
@@ -127,9 +126,11 @@ async def verify_code(request: Request):
             await client.sign_in(phone_number=phone, phone_code=code, phone_code_hash=phone_code_hash)
             # Оставляем клиента подключенным после успешного входа
             client_data["authorized"] = True
-            is_authenticated = True
-            # Перенаправляем на страницу успешного входа
-            return RedirectResponse(url=f"/success?phone={phone}", status_code=303)
+            # Устанавливаем куки для авторизованного пользователя
+            auth_token = serializer.dumps({"authenticated": True})
+            response = RedirectResponse(url=f"/success?phone={phone}", status_code=303)
+            response.set_cookie(key="auth_token", value=auth_token)
+            return response
         except PhoneCodeExpired:
             return JSONResponse(content={"status": "Код подтверждения истек. Пожалуйста, запросите новый код."}, status_code=400)
         except SessionPasswordNeeded:
@@ -140,20 +141,22 @@ async def verify_code(request: Request):
     else:
         return JSONResponse(content={"status": "Введите все необходимые данные"}, status_code=400)
 
-# Роут для отображения страницы успешного входа и списка чатов
-@tg_router.get("/success", response_class=HTMLResponse)
+# Роут для страницы успешного входа и списка чатов
+@tg_router.get("/success", response_class=HTMLResponse, name="success")
 async def success_page(request: Request):
-    global is_authenticated
+    is_authenticated = False
+    auth_token = request.cookies.get("auth_token")
+    if auth_token:
+        try:
+            data = serializer.loads(auth_token)
+            is_authenticated = data.get("authenticated", False)
+        except Exception:
+            pass
+
     if client is None or not client.is_connected:
         return HTMLResponse(content="Не удалось найти сессию клиента. Пожалуйста, авторизуйтесь снова.", status_code=400)
 
     try:
-        user = await client.get_me()
-        if user:
-            is_authenticated = True
-        else:
-            is_authenticated = False
-
         chat_list = []
         async for dialog in client.get_dialogs():
             chat_list.append({
@@ -175,9 +178,34 @@ async def verify_page(request: Request):
 
 # Роут для выхода из системы
 @tg_router.get("/logout", response_class=HTMLResponse)
-async def logout():
-    global is_authenticated, client
+async def logout(response: Response):
+    global client
     if client and client.is_connected:
         await client.disconnect()
+    # Удаляем куки авторизации
+    response = RedirectResponse(url="/")
+    response.delete_cookie("auth_token")
+    return response
+
+# Роут для домашней страницы
+@tg_router.get('/', response_class=HTMLResponse, name="home")
+async def home(request: Request):
     is_authenticated = False
-    return RedirectResponse(url="/")
+    auth_token = request.cookies.get("auth_token")
+    if auth_token:
+        try:
+            data = serializer.loads(auth_token)
+            is_authenticated = data.get("authenticated", False)
+        except Exception:
+            pass
+
+    return templates.TemplateResponse('main/index.html', {
+        'request': request,
+        'app_name': 'ToDo FastAPI - Твой менеджер задач',
+        'is_authenticated': is_authenticated
+    })
+
+# Роут для страницы регистрации
+@tg_router.get("/register", response_class=HTMLResponse)
+async def register(request: Request):
+    return templates.TemplateResponse("user/authotg.html", {"request": request})

@@ -5,12 +5,6 @@ from datetime import datetime
 
 Base = declarative_base()
 
-class ToDo(Base):
-    __tablename__ = 'todos'
-    
-    id = Column(Integer, primary_key=True, index=True)
-    title = Column(String)
-    is_complete = Column(Boolean, default=False)
 
 class Chat(Base):
     __tablename__ = 'chats'

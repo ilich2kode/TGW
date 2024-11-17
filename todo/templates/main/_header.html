@@ -4,18 +4,18 @@
   </a>
 
   <ul class="nav col-12 col-lg-auto me-lg-auto mb-2 justify-content-center mb-md-0">
-    <li><a href="#" class="nav-link px-2 text-secondary">Главная</a></li>
+    <li><a href="{{ url_for('home') }}" class="nav-link px-2 text-secondary">Главная</a></li>
     {#{% if current_user.is_authenticated and current_user.status == 'teacher' %}#}
-    <li><a href="#" class="nav-link px-2 text-white">Добавить группу</a></li>
+    <li><a href="{{ url_for('success') }}" class="nav-link px-2 text-white">Список групп</a></li>
     {#{% endif %}#}
   </ul>
 
 
   <div class="text-end">
     {% if is_authenticated %}
+    <span>Добро пожаловать!</span>
     <a href="{{ url_for('logout') }}" class="btn btn-outline-light me-2">Выйти</a>
     {% else %}
-    <span>Добро пожаловать!</span>
     <a href="{{ url_for('login') }}" class="btn btn-outline-light me-2">Войти</a>
     <a href="{{ url_for('register') }}" class="btn btn-warning">Регистрация</a>
     {% endif %}
