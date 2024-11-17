@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Form, Response
+from fastapi import APIRouter, Request, Form, Response, Depends
 from pyrogram import Client
 from pyrogram.errors import SessionPasswordNeeded, PhoneCodeExpired, FloodWait
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -7,6 +7,16 @@ import os
 import logging
 from dotenv import load_dotenv
 from itsdangerous import URLSafeSerializer
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.future import select
+from sqlalchemy.orm import joinedload
+from todo.database.base import get_db
+from todo.models import Chat, ChatNameHistory
+from datetime import datetime
+from dotenv import set_key
+from sqlalchemy.orm import selectinload
+
 
 # Настройка логирования
 logging.basicConfig(level=logging.ERROR)
@@ -77,10 +87,18 @@ async def send_code(request: Request):
     api_hash = form.get("api_hash")
 
     if phone and api_id and api_hash:
+        # Функция для обновления значения в .env файле
+        def update_env(key, value):
+            set_key(".env", key, value)
+
+        # Использование функции update_env для сохранения API_ID и API_HASH
+        update_env("API_ID", api_id)
+        update_env("API_HASH", api_hash)
+        
         # Сохраняем API_ID и API_HASH в файл .env
-        with open(".env", "w") as env_file:
-            env_file.write(f"API_ID={api_id}\n")
-            env_file.write(f"API_HASH={api_hash}\n")
+        #with open(".env", "w") as env_file:
+        #    env_file.write(f"API_ID={api_id}\n")
+        #    env_file.write(f"API_HASH={api_hash}\n")
 
         # Перезагружаем переменные окружения
         load_dotenv()
@@ -143,7 +161,7 @@ async def verify_code(request: Request):
 
 # Роут для страницы успешного входа и списка чатов
 @tg_router.get("/success", response_class=HTMLResponse, name="success")
-async def success_page(request: Request):
+async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
     is_authenticated = False
     auth_token = request.cookies.get("auth_token")
     if auth_token:
@@ -159,10 +177,45 @@ async def success_page(request: Request):
     try:
         chat_list = []
         async for dialog in client.get_dialogs():
+            chat_id = str(dialog.chat.id)
+            title = dialog.chat.title or dialog.chat.first_name or "Без названия"
+
+            # Проверяем, существует ли уже чат в базе данных
+            result = await db.execute(
+                select(Chat)
+                .where(Chat.chat_id == chat_id)
+                .options(selectinload(Chat.history))
+            )
+            existing_chat = result.scalar_one_or_none()
+
+
+            if existing_chat:
+                # Если название изменилось, добавляем в историю
+                if existing_chat.title != title:
+                    chat_history = ChatNameHistory(
+                        chat_id=existing_chat.id,
+                        old_title=existing_chat.title,
+                        new_title=title,
+                        updated_at=datetime.utcnow()
+                    )
+                    existing_chat.title = title
+                    existing_chat.last_updated = datetime.utcnow()
+                    db.add(chat_history)
+                    await db.commit()
+            else:
+                # Если чат не существует, добавляем его в базу данных
+                new_chat = Chat(
+                    chat_id=chat_id,
+                    title=title,
+                    last_updated=datetime.utcnow()
+                )
+                db.add(new_chat)
+                await db.commit()
+
             chat_list.append({
                 "index": len(chat_list) + 1,
-                "id": dialog.chat.id,
-                "title": dialog.chat.title or dialog.chat.first_name or "Без названия"
+                "id": chat_id,
+                "title": title
             })
     except Exception as e:
         logger.error(f"Ошибка при получении чатов: {e}")
@@ -188,7 +241,7 @@ async def logout(response: Response):
     return response
 
 # Роут для домашней страницы
-@tg_router.get('/', response_class=HTMLResponse, name="home")
+@tg_router.get('/', response_class=HTMLResponse)
 async def home(request: Request):
     is_authenticated = False
     auth_token = request.cookies.get("auth_token")
