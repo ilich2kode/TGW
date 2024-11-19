@@ -5,21 +5,10 @@
 
 <form method="post" action="/verify_code">
     <div class="form-group">
-        <label for="phone">Номер телефона:</label>
-        <input type="text" id="phone" name="phone" class="form-control" required>
-    </div>
-    <div class="form-group">
         <label for="code">Код подтверждения:</label>
         <input type="text" id="code" name="code" class="form-control" required>
     </div>
-    <div class="form-group">
-        <label for="api_id">API ID:</label>
-        <input type="text" id="api_id" name="api_id" class="form-control" value="14034783" required>
-    </div>
-    <div class="form-group">
-        <label for="api_hash">API Hash:</label>
-        <input type="text" id="api_hash" name="api_hash" class="form-control" value="1f5b9b036f893c4c182d2875a368578b" required>
-    </div>
+    <input type="hidden" id="phone" name="phone" value="{{ phone }}">
     <button type="submit" class="btn btn-success">Подтвердить код</button>
 </form>
 {% endblock content %}

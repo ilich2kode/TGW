@@ -5,6 +5,7 @@ from fastapi.templating import Jinja2Templates
 import uvicorn
 import os
 from todo.pyrog.tgbot import tg_router
+from todo.database.base import init_db
 
 app = FastAPI()
 
@@ -26,6 +27,15 @@ templates = Jinja2Templates(directory='todo/templates')  # Создайте эк
 
 # Импортируйте роутеры после создания экземпляра приложения
 app.include_router(tg_router) # Включите router в ваше приложение
+
+@app.on_event("startup")
+async def on_startup():
+    await init_db()  # Инициализация базы данных
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    # Если нужно что-то закрыть при завершении работы приложения
+    pass
 
 # Пример маршрута
 @app.get("/")

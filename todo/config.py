@@ -9,7 +9,6 @@ load_dotenv()
 
 class Settings(BaseSettings):
     app_name: str = os.getenv('NAME_APP')
-    #db_sqlite_url: str = os.getenv('SQLALCHEMY_DATABASE_URI')
     db_postgre_url: str = os.getenv('POSTGRES_DB')
 
     class Config:
