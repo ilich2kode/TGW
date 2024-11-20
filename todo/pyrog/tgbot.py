@@ -5,6 +5,11 @@ from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from fastapi import Depends
 
+from sqlalchemy.orm import Session
+from typing import List
+from sqlalchemy import update
+from sqlalchemy.future import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from dotenv import load_dotenv, set_key
 from itsdangerous import URLSafeSerializer
@@ -17,10 +22,12 @@ from datetime import datetime
 import asyncio
 import os
 import logging
+from fastapi import Request
 
 # Настройка логирования
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # Загрузка переменных из файла .env
 load_dotenv()
@@ -30,9 +37,6 @@ serializer = URLSafeSerializer(SECRET_KEY)
 
 tg_router = APIRouter()
 templates = Jinja2Templates(directory='todo/templates')
-
-
-
 
 # Telegram Client Manager
 class TelegramClientManager:
@@ -73,10 +77,6 @@ class TelegramClientManager:
             return await coro
 
 
-
-
-
-
 # Глобальная настройка менеджера клиента
 api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
@@ -115,9 +115,6 @@ async def login(response: Response):
     except Exception as e:
         logger.error(f"Ошибка при подключении с использованием сессии: {e}")
         return JSONResponse(content={"status": f"Ошибка: {str(e)}"}, status_code=500)
-
-
-
 
 
 @tg_router.post("/send_code", response_class=HTMLResponse)
@@ -175,16 +172,6 @@ async def verify_code(request: Request):
         return JSONResponse(content={"status": f"Ошибка: {str(e)}"}, status_code=500)
 
 
-
-
-
-
-
-
-
-
-
-
 @tg_router.get("/success", response_class=HTMLResponse, name="success")
 async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
     auth_token = request.cookies.get("auth_token")
@@ -198,23 +185,38 @@ async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
     except Exception:
         return HTMLResponse(content="Не авторизован.", status_code=401)
 
+    chat_list = []
+
     try:
-        chat_list = []
+        # Подключение к Telegram API
+        dialogs = []
         async with TelegramClient(session_name, api_id, api_hash) as client:
             logger.info("Получение списка чатов...")
             async for dialog in client.iter_dialogs():
-                chat_id = str(dialog.id)
+                chat_id = str(dialog.id)  # Преобразуем в строку
                 title = dialog.name or "Без названия"
+                dialogs.append({"chat_id": chat_id, "title": title})
 
-                # Проверяем наличие чата в базе
+        # Обработка данных в транзакции
+        async with db.begin():  # Убедимся, что транзакция завершится корректно
+            for dialog in dialogs:
+                chat_id = int(dialog["chat_id"])  # Приведение типа
+                title = dialog["title"].strip()
+
+                if not title:
+                    logger.warning(f"Пропущен диалог с chat_id: {chat_id}, так как отсутствует название.")
+                    continue
+
+                # Проверяем существование чата
                 result = await db.execute(
                     select(Chat).where(Chat.chat_id == chat_id).options(selectinload(Chat.history))
                 )
                 existing_chat = result.scalar_one_or_none()
 
                 if existing_chat:
-                    # Если название чата изменилось, обновляем
-                    if existing_chat.title != title:
+                    # Обновляем только если название изменилось
+                    if existing_chat.title.strip().lower() != title.lower():
+                        logger.info(f"Обновление названия чата: {existing_chat.title} -> {title}")
                         chat_history = ChatNameHistory(
                             chat_id=existing_chat.id,
                             old_title=existing_chat.title,
@@ -225,7 +227,8 @@ async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
                         existing_chat.title = title
                         db.add(chat_history)
                 else:
-                    # Если чата нет, создаем его
+                    # Добавление нового чата
+                    logger.info(f"Добавление нового чата: {title}")
                     new_chat = Chat(
                         chat_id=chat_id,
                         title=title,
@@ -234,16 +237,23 @@ async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
                     )
                     db.add(new_chat)
 
-                # Фиксируем изменения после обработки каждого чата
-                await db.commit()
+                # Определяем, отслеживается ли чат
+                is_tracked = existing_chat.is_tracked if existing_chat else False
 
-                chat_list.append({"id": chat_id, "title": title})
+                # Добавляем в список для отображения
+                chat_list.append({"id": chat_id, "title": title, "is_tracked": is_tracked})
+
+        logger.info("Фиксация транзакции...")
+        await db.commit()  # Сохраняем изменения
 
     except Exception as e:
-        logger.error(f"Ошибка при получении чатов: {e}")
+        logger.error(f"Ошибка при обработке: {e}")
         return HTMLResponse(content="Ошибка получения чатов.", status_code=500)
 
     return templates.TemplateResponse("user/success.html", {"request": request, "chat_list": chat_list})
+
+
+
 
 
 
@@ -288,3 +298,38 @@ async def register(request: Request):
     return templates.TemplateResponse("user/authotg.html", {"request": request})
 
 
+
+
+
+@tg_router.post("/update_tracked")
+async def update_tracked_chats(
+    chat_ids: list[int] = Form(...),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Обновление статуса выбранных чатов (is_tracked).
+    Устанавливает is_tracked=True для выбранных чатов и is_tracked=False для остальных.
+    """
+    try:
+        # Устанавливаем is_tracked=True для выбранных чатов
+        if chat_ids:
+            await db.execute(
+                update(Chat)
+                .where(Chat.chat_id.in_(chat_ids))
+                .values(is_tracked=True, last_updated=datetime.utcnow())
+            )
+        
+        # Устанавливаем is_tracked=False для остальных чатов
+        await db.execute(
+            update(Chat)
+            .where(~Chat.chat_id.in_(chat_ids))  # Чаты, не входящие в выбранные
+            .values(is_tracked=False, last_updated=datetime.utcnow())
+        )
+        
+        await db.commit()
+
+    except Exception as e:
+        logger.error(f"Ошибка обновления отслеживаемых чатов: {e}")
+        return HTMLResponse(content="Ошибка обновления отслеживаемых чатов.", status_code=500)
+
+    return HTMLResponse(content="Выбранные чаты обновлены.", status_code=200)

@@ -1,26 +1,36 @@
 {% extends 'main/base.html' %}
 
 {% block content %}
-<h1>Список чатов и каналов</h1>
+<h1>Список чатов и каналов</h1> <button type="submit" class="btn btn-primary">Сохранить выбранные</button>
 
-<table class="table">
-    <thead>
-        <tr>
-            <th>#</th>
-            <th>Выбрать</th>
-            <th>Название</th>
-            <th>ID</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for chat in chat_list %}
-        <tr>
-            <td>{{ chat.index }}</td>
-            <td><input type="checkbox" name="chat" value="{{ chat.id }}"></td>
-            <td>{{ chat.title }}</td>
-            <td>{{ chat.id }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
+<form method="POST" action="/update_tracked">
+    <table class="table">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th>Выбрать</th>
+                <th>Название</th>
+                <th>ID</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for chat in chat_list %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>
+                    <input 
+                        type="checkbox" 
+                        name="chat_ids" 
+                        value="{{ chat.id }}" 
+                        {% if chat.is_tracked %}checked{% endif %}>
+                </td>
+                <td>{{ chat.title }}</td>
+                <td>{{ chat.id }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <button type="submit" class="btn btn-primary">Сохранить выбранные</button>
+</form>
+
 {% endblock %}
