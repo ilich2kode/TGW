@@ -100,6 +100,32 @@ async def shutdown_event():
 
 client_data = {}
 
+
+async def update_is_title_changed(chat: Chat, db: AsyncSession):
+    """
+    Обновляет поле is_title_changed для заданного чата.
+    """
+    result_history = await db.execute(
+        select(ChatNameHistory)
+        .where(ChatNameHistory.chat_id == chat.id)
+        .order_by(ChatNameHistory.updated_at.desc())
+    )
+    has_name_change = result_history.scalars().first() is not None
+
+    # Обновляем поле is_title_changed в таблице Chat
+    await db.execute(
+        update(Chat)
+        .where(Chat.id == chat.id)
+        .values(is_title_changed=has_name_change)
+    )
+    await db.commit()
+
+
+
+
+
+
+
 @tg_router.get("/login", response_class=HTMLResponse, name="login")
 async def login(response: Response):
     try:
@@ -301,8 +327,12 @@ async def register(request: Request):
 
 
 
+from fastapi.responses import RedirectResponse
+from fastapi.requests import Request
+
 @tg_router.post("/update_tracked")
 async def update_tracked_chats(
+    request: Request,
     chat_ids: list[int] = Form(...),
     db: AsyncSession = Depends(get_db)
 ):
@@ -332,4 +362,210 @@ async def update_tracked_chats(
         logger.error(f"Ошибка обновления отслеживаемых чатов: {e}")
         return HTMLResponse(content="Ошибка обновления отслеживаемых чатов.", status_code=500)
 
-    return HTMLResponse(content="Выбранные чаты обновлены.", status_code=200)
+    # Перенаправляем на главную страницу
+    return RedirectResponse(url="/", status_code=302)
+
+
+@tg_router.api_route("/all_chat", methods=["GET", "POST"], response_class=HTMLResponse)
+async def all_chat(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Обрабатывает отображение и обновление статуса отслеживания чатов.
+    """
+    if request.method == "GET":
+        # Обработка GET-запроса: отображение списка чатов
+        try:
+            result = await db.execute(select(Chat))
+            chats = result.scalars().all()
+            chat_list = [
+                {
+                    "id": chat.id,
+                    "chat_id": chat.chat_id,
+                    "title": chat.title,
+                    "is_tracked": chat.is_tracked,
+                    "is_title_changed": chat.is_title_changed,
+                }
+                for chat in chats
+            ]
+            return templates.TemplateResponse(
+                "post/all_chat.html", 
+                {"request": request, "chat_list": chat_list}
+            )
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке списка чатов: {e}")
+            return HTMLResponse(content="Ошибка загрузки списка чатов.", status_code=500)
+
+    elif request.method == "POST":
+        # Обработка POST-запроса: обновление статуса отслеживания
+        try:
+            form = await request.form()
+            selected_chat_ids = form.getlist("chat_ids")
+            selected_chat_ids = [int(chat_id) for chat_id in selected_chat_ids]
+
+            # Устанавливаем is_tracked=True для выбранных чатов
+            if selected_chat_ids:
+                await db.execute(
+                    update(Chat)
+                    .where(Chat.id.in_(selected_chat_ids))
+                    .values(is_tracked=True, last_updated=datetime.utcnow())
+                )
+
+            # Устанавливаем is_tracked=False для остальных чатов
+            await db.execute(
+                update(Chat)
+                .where(~Chat.id.in_(selected_chat_ids))
+                .values(is_tracked=False, last_updated=datetime.utcnow())
+            )
+
+            # Фиксируем изменения
+            await db.commit()
+
+            return RedirectResponse(url="/all_chat", status_code=303)
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении статуса чатов: {e}")
+            return HTMLResponse(content="Ошибка обновления статуса чатов.", status_code=500)
+
+
+
+
+
+
+
+
+@tg_router.get("/chat_is_tracked", response_class=HTMLResponse)
+async def get_tracked_chats(request: Request, db: AsyncSession = Depends(get_db)):
+    """
+    Возвращает страницу со списком чатов, где is_tracked=True,
+    и обновляет информацию о смене названия.
+    """
+    try:
+        # Извлекаем чаты с is_tracked=True
+        result = await db.execute(select(Chat).where(Chat.is_tracked == True))
+        tracked_chats = result.scalars().all()
+
+        # Список для обновления статуса is_title_changed
+        updated_chats = []
+
+        for chat in tracked_chats:
+            # Проверяем, есть ли записи об изменении названия
+            result_history = await db.execute(
+                select(ChatNameHistory)
+                .where(ChatNameHistory.chat_id == chat.id)
+                .order_by(ChatNameHistory.updated_at.desc())
+            )
+            has_name_change = result_history.scalars().first() is not None
+
+            # Обновляем поле is_title_changed, если оно изменилось
+            if chat.is_title_changed != has_name_change:
+                chat.is_title_changed = has_name_change
+                updated_chats.append(chat)
+
+        # Сохраняем обновления в базе данных одним коммитом
+        if updated_chats:
+            db.add_all(updated_chats)
+            await db.commit()
+
+        # Создаём список чатов для отображения
+        chat_list = [
+            {
+                "id": chat.id,
+                "chat_id": chat.chat_id,
+                "title": chat.title,
+                "is_tracked": chat.is_tracked,
+                "is_title_changed": chat.is_title_changed,
+            }
+            for chat in tracked_chats
+        ]
+
+        # Передаём данные в шаблон
+        return templates.TemplateResponse(
+            "post/chat_is_tracked.html",
+            {"request": request, "chat_list": chat_list}
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке отслеживаемых чатов: {e}")
+        return HTMLResponse(content="Ошибка загрузки отслеживаемых чатов.", status_code=500)
+
+
+
+@tg_router.get("/chat_name_history", response_class=HTMLResponse)
+async def chat_name_history_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    date_from: str = None,
+    date_to: str = None,
+    chat_id: str = None  # Новый параметр для фильтрации по ID чата
+):
+    """
+    Отображение страницы с историей изменённых чатов.
+
+    Аргументы:
+        request (Request): Запрос FastAPI.
+        db (AsyncSession): Сессия базы данных.
+        date_from (str): Дата начала фильтрации в формате ISO (опционально).
+        date_to (str): Дата окончания фильтрации в формате ISO (опционально).
+        chat_id (str): ID чата для фильтрации (опционально).
+
+    Возвращает:
+        HTMLResponse: Шаблон с историей изменённых чатов.
+    """
+    try:
+        # Преобразуем даты из строки в datetime (если указаны)
+        date_from_dt = datetime.fromisoformat(date_from) if date_from else None
+        date_to_dt = datetime.fromisoformat(date_to) if date_to else None
+
+        # Создаём запрос к таблицам Chat и ChatNameHistory
+        query = (
+            select(Chat, ChatNameHistory)
+            .join(ChatNameHistory, Chat.id == ChatNameHistory.chat_id)
+            .where(ChatNameHistory.is_title_changed == True)
+        )
+
+        # Добавляем фильтрацию по дате, если указано
+        if date_from_dt:
+            query = query.where(ChatNameHistory.updated_at >= date_from_dt)
+        if date_to_dt:
+            query = query.where(ChatNameHistory.updated_at <= date_to_dt)
+
+        # Добавляем фильтрацию по chat_id, если указано
+        if chat_id:
+            query = query.where(Chat.chat_id == chat_id)
+
+        # Выполняем запрос
+        result = await db.execute(query)
+        rows = result.all()
+
+        # Формируем список истории чатов для шаблона
+        chat_history_list = [
+            {
+                "chat_id": chat.chat_id,
+                "current_title": chat.title,
+                "old_title": history.old_title,
+                "new_title": history.new_title,
+                "updated_at": history.updated_at,
+                "is_tracked": chat.is_tracked,
+            }
+            for chat, history in rows
+        ]
+
+        # Передаём данные в шаблон
+        return templates.TemplateResponse(
+            "post/chat_name_history.html",
+            {
+                "request": request,
+                "chat_history_list": chat_history_list,
+                "date_from": date_from,
+                "date_to": date_to,
+                "chat_id": chat_id,  # Передаём chat_id в шаблон
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке истории чатов: {e}")
+        return HTMLResponse(content="Ошибка загрузки истории чатов.", status_code=500)
+
+
+
+
+
+
+

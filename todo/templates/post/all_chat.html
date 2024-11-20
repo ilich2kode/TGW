@@ -2,7 +2,7 @@
 
 {% block content %}
 <p class="text-center">Выберите за чем будем следить. Внизу нажмите "Сохранить выбранные"</p>
-<form method="POST" action="/update_tracked">
+<form method="POST" action="/all_chat">
     <div class="form-group mb-3">
         <input 
             type="text" 
@@ -18,6 +18,7 @@
                 <th>Выбрать</th>
                 <th onclick="sortTable(2)" style="cursor:pointer;">Название &#x25B2;&#x25BC;</th>
                 <th onclick="sortTable(3)" style="cursor:pointer;">ID &#x25B2;&#x25BC;</th>
+                <th onclick="sortTable(4)" style="cursor:pointer;">Смена названия &#x25B2;&#x25BC;</th>
             </tr>
         </thead>
         <tbody>
@@ -33,6 +34,7 @@
                 </td>
                 <td>{{ chat.title }}</td>
                 <td>{{ chat.id }}</td>
+                <td>{% if chat.is_title_changed %}Да{% else %}Нет{% endif %}</td>
             </tr>
             {% endfor %}
         </tbody>
@@ -41,19 +43,18 @@
 </form>
 
 <script>
-    let searchTimeout; // Хранит идентификатор таймера для дебаунса
+    let searchTimeout;
 
-    // Функция для фильтрации строк таблицы
     function filterTable() {
         const input = document.getElementById('searchInput');
         const filter = input.value.toLowerCase();
         const table = document.getElementById('chatTable');
         const rows = table.getElementsByTagName('tr');
         
-        for (let i = 1; i < rows.length; i++) { // Начинаем с 1, пропускаем заголовок
+        for (let i = 1; i < rows.length; i++) {
             const cells = rows[i].getElementsByTagName('td');
             let match = false;
-            for (let j = 2; j < cells.length; j++) { // Проверяем только столбцы Название и ID
+            for (let j = 2; j < cells.length; j++) {
                 if (cells[j].innerText.toLowerCase().includes(filter)) {
                     match = true;
                     break;
@@ -63,30 +64,28 @@
         }
     }
 
-    // Дебаунс-функция для добавления задержки
     function debouncedFilterTable() {
-        clearTimeout(searchTimeout); // Очистить предыдущий таймер
-        searchTimeout = setTimeout(filterTable, 2000); // Установить новый таймер на 2 секунды
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(filterTable, 500);
     }
 
-    // Функция для сортировки столбцов
     function sortTable(columnIndex) {
         const table = document.getElementById('chatTable');
-        const rows = Array.from(table.rows).slice(1); // Пропускаем заголовок
+        const rows = Array.from(table.rows).slice(1);
         const isAscending = table.dataset.sortOrder === 'asc';
         table.dataset.sortOrder = isAscending ? 'desc' : 'asc';
         
         rows.sort((a, b) => {
-            const aText = a.cells[columnIndex].innerText;
-            const bText = b.cells[columnIndex].innerText;
+            const aText = a.cells[columnIndex].innerText.trim();
+            const bText = b.cells[columnIndex].innerText.trim();
             
-            if (!isNaN(aText) && !isNaN(bText)) { // Если числа, сортируем как числа
+            if (!isNaN(aText) && !isNaN(bText)) {
                 return isAscending ? aText - bText : bText - aText;
             }
             return isAscending ? aText.localeCompare(bText) : bText.localeCompare(aText);
         });
         
-        rows.forEach(row => table.tBodies[0].appendChild(row)); // Перестраиваем таблицу
+        rows.forEach(row => table.tBodies[0].appendChild(row));
     }
 </script>
 {% endblock %}

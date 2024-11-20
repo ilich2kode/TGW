@@ -34,6 +34,7 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    print("Приложение завершает работу...")
     # Если нужно что-то закрыть при завершении работы приложения
     pass
 

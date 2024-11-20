@@ -1,0 +1,26 @@
+{% extends 'main/base.html' %}
+{% block content %}
+<h2 class="text-center">Список отслеживаемых чатов</h2>
+
+<table class="table table-striped">
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>ID</th>
+            <th>Название</th>
+            <th>Смена названия</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for chat in chat_list %}
+        <tr>
+            <td>{{ loop.index }}</td>
+            <td>{{ chat.chat_id }}</td>
+            <td>{{ chat.title }}</td>
+            <td>{% if chat.is_title_changed %}Да{% else %}Нет{% endif %}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% endblock %}
+

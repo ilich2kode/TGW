@@ -5,15 +5,14 @@
 
   <ul class="nav col-12 col-lg-auto me-lg-auto mb-2 justify-content-center mb-md-0">
     <li><a href="{{ url_for('home') }}" class="nav-link px-2 text-secondary">Главная</a></li>
-    {#{% if current_user.is_authenticated and current_user.status == 'teacher' %}#}
-    <li><a href="{{ url_for('success') }}" class="nav-link px-2 text-white">Список групп</a></li>
-    {#{% endif %}#}
+    <li><a href="{{ url_for('success') }}" class="nav-link px-2 text-white">Список групп ТГ</a></li>
+    <li><a href="/all_chat" class="nav-link px-2 text-white">Все группы БД</a></li>
+    <li><a href="/chat_is_tracked" class="nav-link px-2 text-white">Все за кем следим</a></li>
+    <li><a href="/chat_name_history" class="nav-link px-2 text-white">Все изменения</a></li>
   </ul>
-
 
   <div class="text-end">
     {% if is_authenticated %}
-    <span>Добро пожаловать!</span>
     <a href="{{ url_for('logout') }}" class="btn btn-outline-light me-2">Выйти</a>
     {% else %}
     <a href="{{ url_for('login') }}" class="btn btn-outline-light me-2">Войти</a>
@@ -21,3 +20,4 @@
     {% endif %}
 </div>
 </div>
+
