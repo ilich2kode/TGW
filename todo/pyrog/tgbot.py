@@ -10,6 +10,8 @@ from typing import List
 from sqlalchemy import update
 from sqlalchemy.future import select
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql.expression import bindparam
+from sqlalchemy.sql import text
 
 from dotenv import load_dotenv, set_key
 from itsdangerous import URLSafeSerializer
@@ -100,70 +102,69 @@ async def shutdown_event():
 
 client_data = {}
 
+BATCH_SIZE = 500  # Размер пакета
 
-async def update_is_title_changed(chat: Chat, db: AsyncSession):
+async def process_chats_via_temp_table(db: AsyncSession, chat_data):
     """
-    Обновляет поле is_title_changed для заданного чата.
+    Обрабатывает чаты через временную таблицу и хранимую процедуру.
     """
-    result_history = await db.execute(
-        select(ChatNameHistory)
-        .where(ChatNameHistory.chat_id == chat.id)
-        .order_by(ChatNameHistory.updated_at.desc())
-    )
-    has_name_change = result_history.scalars().first() is not None
+    # Уникальное имя временной таблицы
+    temp_table_name = f"temp_chats_{int(datetime.utcnow().timestamp())}"
 
-    # Обновляем поле is_title_changed в таблице Chat
-    await db.execute(
-        update(Chat)
-        .where(Chat.id == chat.id)
-        .values(is_title_changed=has_name_change)
-    )
-    await db.commit()
+    try:
+        # Создание временной таблицы
+        create_temp_table_query = text(f"""
+            CREATE TEMP TABLE {temp_table_name} (
+                chat_id BIGINT,
+                title TEXT,
+                is_title_changed BOOLEAN
+            ) ON COMMIT DROP;
+        """)
+        await db.execute(create_temp_table_query)
 
+        # Запись данных в временную таблицу пакетами
+        insert_query = text(f"""
+            INSERT INTO {temp_table_name} (chat_id, title, is_title_changed)
+            VALUES (:chat_id, :title, :is_title_changed)
+        """)
+        for i in range(0, len(chat_data), BATCH_SIZE):
+            batch = chat_data[i:i + BATCH_SIZE]
+            await db.execute(insert_query, batch)
 
-async def save_in_batches(session: AsyncSession, objects, batch_size: int = 100):
-    """
-    Сохраняет объекты в базу данных пакетами.
-    
-    Args:
-        session (AsyncSession): Асинхронная сессия SQLAlchemy.
-        objects (List[Any]): Список объектов для сохранения.
-        batch_size (int): Размер батча.
-    """
-    for i in range(0, len(objects), batch_size):
-        batch = objects[i:i + batch_size]
-        session.add_all(batch)
-        await session.commit()
+        # Вызов хранимой процедуры
+        call_procedure_query = text(f"CALL process_chat_data('{temp_table_name}')")
+        await db.execute(call_procedure_query)
+
+        # Фиксация изменений
+        await db.commit()
+        logger.info(f"Данные успешно обработаны через временную таблицу {temp_table_name}.")
+    except Exception as e:
+        logger.error(f"Ошибка при обработке временной таблицы {temp_table_name}: {e}")
+        await db.rollback()
 
 
 async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
     """
-    Периодически проверяет новые чаты и добавляет их в базу данных.
+    Периодически проверяет новые чаты и изменения существующих.
     """
+    is_initial_run = True  # Флаг для первого запуска
+
     while True:
         try:
-            logger.info("Запуск проверки новых чатов...")
+            logger.info("Запуск проверки чатов...")
             dialogs = []
-            
-            # Загружаем все диалоги из Telegram
+
+            # Получение всех чатов из Telegram
             async with telegram_manager.client:
                 async for dialog in telegram_manager.client.iter_dialogs():
                     chat_id = dialog.id
                     title = dialog.name or "Без названия"
                     dialogs.append({"chat_id": chat_id, "title": title.strip()})
 
-            # Получаем все существующие чаты из базы одним запросом
-            chat_ids = [dialog["chat_id"] for dialog in dialogs]
-            existing_chats_result = await db.execute(
-                select(Chat).where(Chat.chat_id.in_(chat_ids))
-            )
-            existing_chats = {chat.chat_id: chat for chat in existing_chats_result.scalars()}
+            logger.info(f"Загружено {len(dialogs)} диалогов из Telegram.")
 
-            # Списки для добавления и обновления чатов
-            new_chats = []
-            updated_chats = []
-            chat_histories = []
-
+            # Подготовка данных для временной таблицы
+            chat_data = []
             for dialog in dialogs:
                 chat_id = dialog["chat_id"]
                 title = dialog["title"]
@@ -172,55 +173,39 @@ async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
                     logger.warning(f"Пропущен диалог с chat_id: {chat_id}, так как отсутствует название.")
                     continue
 
-                existing_chat = existing_chats.get(chat_id)
-                if existing_chat:
-                    # Обновляем только если название изменилось
-                    if existing_chat.title.strip().lower() != title.lower():
-                        logger.info(f"Обновление названия чата: {existing_chat.title} -> {title}")
-                        chat_histories.append(
-                            ChatNameHistory(
-                                chat_id=existing_chat.id,
-                                old_title=existing_chat.title,
-                                new_title=title,
-                                updated_at=datetime.utcnow(),
-                                is_title_changed=True,
-                            )
-                        )
-                        existing_chat.title = title
-                        existing_chat.last_updated = datetime.utcnow()
-                        updated_chats.append(existing_chat)
-                else:
-                    # Добавляем новый чат
-                    logger.info(f"Добавление нового чата: {title}")
-                    new_chats.append(
-                        Chat(
-                            chat_id=chat_id,
-                            title=title,
-                            last_updated=datetime.utcnow(),
-                            is_title_changed=False,
-                        )
-                    )
+                chat_data.append({
+                    "chat_id": chat_id,
+                    "title": title,
+                    "is_title_changed": False  # Значение обновится в хранимой процедуре
+                })
 
-            # Сохранение данных в базу
-            if new_chats:
-                logger.info(f"Сохранение {len(new_chats)} новых чатов пакетами.")
-                await save_in_batches(db, new_chats, batch_size=100)
+            # Обработка через временную таблицу и хранимую процедуру
+            if chat_data:
+                logger.info(f"Обработка {len(chat_data)} чатов через временную таблицу.")
+                await process_chats_via_temp_table(db, chat_data)
 
-            if updated_chats:
-                logger.info(f"Сохранение {len(updated_chats)} обновлённых чатов пакетами.")
-                await save_in_batches(db, updated_chats, batch_size=100)
+            logger.info("Проверка чатов завершена успешно.")
 
-            if chat_histories:
-                logger.info(f"Сохранение {len(chat_histories)} записей истории чатов пакетами.")
-                await save_in_batches(db, chat_histories, batch_size=100)
+            # После первого запуска сбросить флаг
+            if is_initial_run:
+                is_initial_run = False
 
-            logger.info("Проверка завершена.")
         except Exception as e:
             logger.error(f"Ошибка при обновлении чатов: {e}")
             await db.rollback()
         finally:
-            # Ждём перед следующей проверкой
             await asyncio.sleep(interval)
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -7,6 +7,7 @@ import asyncio
 import os
 from todo.pyrog.tgbot import tg_router, telegram_manager, fetch_new_chats_periodically
 from todo.database.base import init_db, get_db
+from todo.models import initialize_database, handle_temp_table
 
 app = FastAPI()
 
@@ -29,24 +30,38 @@ templates = Jinja2Templates(directory='todo/templates')  # Создайте эк
 # Импортируйте роутеры после создания экземпляра приложения
 app.include_router(tg_router)  # Включите router в ваше приложение
 
+
+
 @app.on_event("startup")
 async def on_startup():
     """
     Событие запуска приложения.
     """
-    await init_db()  # Инициализация базы данных
-    await telegram_manager.start()  # Старт Telegram клиента
+    # Инициализация базы данных
+    await init_db()
 
-    # Создаем асинхронный генератор для сессии базы данных
+    # Старт Telegram клиента
+    await telegram_manager.start()
+
+    # Создаем объект сессии из генератора
     async def get_session():
         async for session in get_db():
             return session
 
-    # Извлекаем сессию из генератора
     session = await get_session()
 
-    # Запускаем фоновую задачу
-    asyncio.create_task(fetch_new_chats_periodically(session))
+    # Создание хранимой процедуры process_chat_data
+    await initialize_database(session)
+
+    # Работа с временной таблицей
+    await handle_temp_table(session)
+
+    # Запускаем фоновую задачу для обновления чатов
+    asyncio.create_task(fetch_new_chats_periodically(session, interval=60))  # Интервал 60 секунд (1 минута)
+
+
+
+
 
 
 
