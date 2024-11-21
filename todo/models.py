@@ -1,11 +1,11 @@
-# Импорты
-from todo.database.base import Base  # Используем Base из base.py
-from sqlalchemy import Column, String, Integer, Boolean, ForeignKey, TIMESTAMP, BigInteger, event, func
+from sqlalchemy import (
+    Column, String, Integer, Boolean, ForeignKey, TIMESTAMP, BigInteger, JSON, func, event, text
+)
 from sqlalchemy.orm import relationship
+from sqlalchemy.ext.asyncio import AsyncSession
 from contextvars import ContextVar
 import logging
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.sql import text
+from todo.database.base import Base  # Используем Base из base.py
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # Локальный флаг для предотвращения рекурсии
 sync_in_progress = ContextVar("sync_in_progress", default=False)
 
-# Модели данных
+# Модель Chat
 class Chat(Base):
     __tablename__ = "chats"
 
@@ -23,23 +23,74 @@ class Chat(Base):
     last_updated = Column(TIMESTAMP(timezone=True), server_default=func.now())
     is_title_changed = Column(Boolean, default=False)
     is_tracked = Column(Boolean, default=False)
-    history = relationship("ChatNameHistory", back_populates="chat")
+
+    # Связь с ChatNameHistory
+    history = relationship("ChatNameHistory", back_populates="chat", cascade="all, delete-orphan")
+
+    # Связь с Message
+    messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
 
 
+# Модель ChatNameHistory
 class ChatNameHistory(Base):
     __tablename__ = "chat_name_history"
 
     id = Column(BigInteger, primary_key=True, index=True)
-    chat_id = Column(BigInteger, ForeignKey("chats.id"), nullable=False)
+    chat_id = Column(BigInteger, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
     old_title = Column(String, nullable=True)
     new_title = Column(String, nullable=True)
     updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
     is_title_changed = Column(Boolean, default=True)
     is_tracked = Column(Boolean, default=False)
+
+    # Связь с Chat
     chat = relationship("Chat", back_populates="history")
 
 
-# События SQLAlchemy
+# Модель Message
+class Message(Base):
+    __tablename__ = "messages"
+
+    id = Column(BigInteger, primary_key=True, index=True)  # Уникальный ID сообщения
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)  # Привязка к таблице chats
+    from_id = Column(BigInteger, nullable=True)  # ID отправителя
+    text = Column(String, nullable=True)  # Текст сообщения
+    date = Column(TIMESTAMP(timezone=True), nullable=False)  # Дата отправки
+    edit_date = Column(TIMESTAMP(timezone=True), nullable=True)  # Дата редактирования
+    reply_to = Column(BigInteger, nullable=True)  # Ответ на сообщение
+    is_forward = Column(Boolean, default=False)  # Флаг пересылки
+    is_reply = Column(Boolean, default=False)  # Флаг ответа
+    media = Column(JSON, nullable=True)  # JSON с вложениями
+    via_bot_id = Column(BigInteger, nullable=True)  # ID бота, через которого отправлено сообщение
+    is_pinned = Column(Boolean, default=False)  # Закреплено ли сообщение
+    post_author = Column(String, nullable=True)  # Автор поста
+    grouped_id = Column(BigInteger, nullable=True)  # Группировка медиа
+
+    # Связь с таблицей chats
+    chat = relationship("Chat", back_populates="messages")
+
+    # Связь с MessageEdit
+    edits = relationship("MessageEdit", back_populates="message", cascade="all, delete-orphan")
+
+
+# Модель MessageEdit
+class MessageEdit(Base):
+    __tablename__ = "message_edits"
+
+    id = Column(Integer, primary_key=True, autoincrement=True, index=True)  # Уникальный идентификатор записи
+    message_id = Column(BigInteger, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)  # Привязка к сообщениям
+    old_date = Column(TIMESTAMP(timezone=True), nullable=False)  # Дата и время старого сообщения
+    edit_date = Column(TIMESTAMP(timezone=True), nullable=False)  # Дата и время редактирования
+    old_text = Column(String, nullable=True)  # Старый текст сообщения
+    new_text = Column(String, nullable=True)  # Новый текст сообщения
+    old_media = Column(JSON, nullable=True)  # Старое вложение (если изменилось)
+    new_media = Column(JSON, nullable=True)  # Новое вложение (если изменилось)
+
+    # Связь с таблицей Message
+    message = relationship("Message", back_populates="edits")
+
+
+# События SQLAlchemy для синхронизации
 @event.listens_for(Chat, "after_update")
 def sync_chat_to_history(mapper, connection, target):
     logger.info(f"Triggered sync_chat_to_history for Chat ID {target.id}")
@@ -73,13 +124,10 @@ def sync_history_to_chat(mapper, connection, target):
         sync_in_progress.set(False)
 
 
-
-
-
+# Хранимая процедура и временные таблицы
 async def initialize_database(session: AsyncSession):
     """
     Создает или обновляет хранимую процедуру process_chat_data.
-    Если буду делать алембик, то нужно будет переписать эту часть.
     """
     try:
         create_procedure_query = text("""
@@ -127,10 +175,6 @@ async def initialize_database(session: AsyncSession):
     except Exception as e:
         print(f"Ошибка при создании хранимой процедуры: {e}")
         await session.rollback()
-
-
-
-
 
 
 async def handle_temp_table(session: AsyncSession):
