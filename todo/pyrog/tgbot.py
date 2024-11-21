@@ -121,6 +121,108 @@ async def update_is_title_changed(chat: Chat, db: AsyncSession):
     await db.commit()
 
 
+async def save_in_batches(session: AsyncSession, objects, batch_size: int = 100):
+    """
+    Сохраняет объекты в базу данных пакетами.
+    
+    Args:
+        session (AsyncSession): Асинхронная сессия SQLAlchemy.
+        objects (List[Any]): Список объектов для сохранения.
+        batch_size (int): Размер батча.
+    """
+    for i in range(0, len(objects), batch_size):
+        batch = objects[i:i + batch_size]
+        session.add_all(batch)
+        await session.commit()
+
+
+async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
+    """
+    Периодически проверяет новые чаты и добавляет их в базу данных.
+    """
+    while True:
+        try:
+            logger.info("Запуск проверки новых чатов...")
+            dialogs = []
+            
+            # Загружаем все диалоги из Telegram
+            async with telegram_manager.client:
+                async for dialog in telegram_manager.client.iter_dialogs():
+                    chat_id = dialog.id
+                    title = dialog.name or "Без названия"
+                    dialogs.append({"chat_id": chat_id, "title": title.strip()})
+
+            # Получаем все существующие чаты из базы одним запросом
+            chat_ids = [dialog["chat_id"] for dialog in dialogs]
+            existing_chats_result = await db.execute(
+                select(Chat).where(Chat.chat_id.in_(chat_ids))
+            )
+            existing_chats = {chat.chat_id: chat for chat in existing_chats_result.scalars()}
+
+            # Списки для добавления и обновления чатов
+            new_chats = []
+            updated_chats = []
+            chat_histories = []
+
+            for dialog in dialogs:
+                chat_id = dialog["chat_id"]
+                title = dialog["title"]
+
+                if not title:
+                    logger.warning(f"Пропущен диалог с chat_id: {chat_id}, так как отсутствует название.")
+                    continue
+
+                existing_chat = existing_chats.get(chat_id)
+                if existing_chat:
+                    # Обновляем только если название изменилось
+                    if existing_chat.title.strip().lower() != title.lower():
+                        logger.info(f"Обновление названия чата: {existing_chat.title} -> {title}")
+                        chat_histories.append(
+                            ChatNameHistory(
+                                chat_id=existing_chat.id,
+                                old_title=existing_chat.title,
+                                new_title=title,
+                                updated_at=datetime.utcnow(),
+                                is_title_changed=True,
+                            )
+                        )
+                        existing_chat.title = title
+                        existing_chat.last_updated = datetime.utcnow()
+                        updated_chats.append(existing_chat)
+                else:
+                    # Добавляем новый чат
+                    logger.info(f"Добавление нового чата: {title}")
+                    new_chats.append(
+                        Chat(
+                            chat_id=chat_id,
+                            title=title,
+                            last_updated=datetime.utcnow(),
+                            is_title_changed=False,
+                        )
+                    )
+
+            # Сохранение данных в базу
+            if new_chats:
+                logger.info(f"Сохранение {len(new_chats)} новых чатов пакетами.")
+                await save_in_batches(db, new_chats, batch_size=100)
+
+            if updated_chats:
+                logger.info(f"Сохранение {len(updated_chats)} обновлённых чатов пакетами.")
+                await save_in_batches(db, updated_chats, batch_size=100)
+
+            if chat_histories:
+                logger.info(f"Сохранение {len(chat_histories)} записей истории чатов пакетами.")
+                await save_in_batches(db, chat_histories, batch_size=100)
+
+            logger.info("Проверка завершена.")
+        except Exception as e:
+            logger.error(f"Ошибка при обновлении чатов: {e}")
+            await db.rollback()
+        finally:
+            # Ждём перед следующей проверкой
+            await asyncio.sleep(interval)
+
+
 
 
 
