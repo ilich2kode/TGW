@@ -8,6 +8,11 @@ import os
 from todo.pyrog.tgbot import tg_router, telegram_manager, fetch_new_chats_periodically
 from todo.database.base import init_db, get_db
 from todo.models import initialize_database, handle_temp_table
+import logging
+from globals import telegram_client_ready, session_name, session_file
+
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -30,6 +35,15 @@ templates = Jinja2Templates(directory='todo/templates')  # Создайте эк
 # Импортируйте роутеры после создания экземпляра приложения
 app.include_router(tg_router)  # Включите router в ваше приложение
 
+import os
+import asyncio
+from logging import getLogger
+
+logger = getLogger(__name__)
+
+
+
+    
 
 
 @app.on_event("startup")
@@ -37,27 +51,47 @@ async def on_startup():
     """
     Событие запуска приложения.
     """
-    # Инициализация базы данных
-    await init_db()
+    global telegram_client_ready  # Указываем, что используем глобальную переменную
 
-    # Старт Telegram клиента
-    await telegram_manager.start()
+    try:
+        # Инициализация базы данных
+        await init_db()
+        logger.info("Инициализация базы данных завершена.")
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации базы данных: {e}")
+        raise
 
-    # Создаем объект сессии из генератора
-    async def get_session():
-        async for session in get_db():
-            return session
+    # Проверка наличия файла сессии
+    try:
+        # Установим ограничение на время ожидания файла сессии (например, 5 минут)
+        timeout = 300
+        start_time = asyncio.get_event_loop().time()
+        while not telegram_client_ready:
+            if os.path.exists(session_file):
+                logger.info(f"Файл сессии '{session_file}' найден. Ожидание завершено.")
+                telegram_client_ready = True  # Устанавливаем глобальную переменную
+            else:
+                elapsed_time = asyncio.get_event_loop().time() - start_time
+                if elapsed_time > timeout:
+                    raise TimeoutError(f"Файл сессии '{session_file}' не появился за {timeout} секунд.")
+                logger.warning(f"Файл сессии '{session_file}' не найден. Ожидание...")
+                await asyncio.sleep(10)
+    except Exception as e:
+        logger.error(f"Ошибка при ожидании файла сессии: {e}")
+        raise
 
-    session = await get_session()
+    # Запуск Telegram клиента
+    try:
+        await telegram_manager.start()
+        logger.info("Telegram клиент успешно запущен.")
+    except Exception as e:
+        logger.error(f"Ошибка при запуске Telegram клиента: {e}")
+        raise
 
-    # Создание хранимой процедуры process_chat_data
-    await initialize_database(session)
 
-    # Работа с временной таблицей
-    await handle_temp_table(session)
 
-    # Запускаем фоновую задачу для обновления чатов
-    asyncio.create_task(fetch_new_chats_periodically(session, interval=60))  # Интервал 60 секунд (1 минута)
+
+
 
 
 

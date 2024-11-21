@@ -26,6 +26,9 @@ import os
 import logging
 from fastapi import Request
 
+# Импортируем глобальное состояние
+from globals import telegram_client_ready, session_name
+
 # Настройка логирования
 logging.basicConfig(level=logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -286,7 +289,10 @@ async def verify_code(request: Request):
 
 
 @tg_router.get("/success", response_class=HTMLResponse, name="success")
-async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
+async def success_page(request: Request):
+    """
+    Страница успешной авторизации.
+    """
     auth_token = request.cookies.get("auth_token")
     if not auth_token:
         return HTMLResponse(content="Не авторизован.", status_code=401)
@@ -295,75 +301,19 @@ async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
         data = serializer.loads(auth_token)
         if not data.get("authenticated", False):
             return HTMLResponse(content="Не авторизован.", status_code=401)
-    except Exception:
+    except Exception as e:
+        logger.error(f"Ошибка при декодировании токена: {e}")
         return HTMLResponse(content="Не авторизован.", status_code=401)
 
-    chat_list = []
+    # Проверка готовности Telegram клиента
+    if not telegram_client_ready:  # Исправлено: убраны круглые скобки
+        logger.warning("Telegram клиент не готов. Выполните настройку клиента.")
+        return HTMLResponse(content="Telegram клиент не готов. Попробуйте позже.", status_code=503)
 
-    try:
-        # Подключение к Telegram API
-        dialogs = []
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            logger.info("Получение списка чатов...")
-            async for dialog in client.iter_dialogs():
-                chat_id = str(dialog.id)  # Преобразуем в строку
-                title = dialog.name or "Без названия"
-                dialogs.append({"chat_id": chat_id, "title": title})
+    # Переход на страницу отображения всех чатов
+    return templates.TemplateResponse("post/all_chat.html", {"request": request})
 
-        # Обработка данных в транзакции
-        async with db.begin():  # Убедимся, что транзакция завершится корректно
-            for dialog in dialogs:
-                chat_id = int(dialog["chat_id"])  # Приведение типа
-                title = dialog["title"].strip()
 
-                if not title:
-                    logger.warning(f"Пропущен диалог с chat_id: {chat_id}, так как отсутствует название.")
-                    continue
-
-                # Проверяем существование чата
-                result = await db.execute(
-                    select(Chat).where(Chat.chat_id == chat_id).options(selectinload(Chat.history))
-                )
-                existing_chat = result.scalar_one_or_none()
-
-                if existing_chat:
-                    # Обновляем только если название изменилось
-                    if existing_chat.title.strip().lower() != title.lower():
-                        logger.info(f"Обновление названия чата: {existing_chat.title} -> {title}")
-                        chat_history = ChatNameHistory(
-                            chat_id=existing_chat.id,
-                            old_title=existing_chat.title,
-                            new_title=title,
-                            updated_at=datetime.utcnow(),
-                            is_title_changed=True,
-                        )
-                        existing_chat.title = title
-                        db.add(chat_history)
-                else:
-                    # Добавление нового чата
-                    logger.info(f"Добавление нового чата: {title}")
-                    new_chat = Chat(
-                        chat_id=chat_id,
-                        title=title,
-                        last_updated=datetime.utcnow(),
-                        is_title_changed=False,
-                    )
-                    db.add(new_chat)
-
-                # Определяем, отслеживается ли чат
-                is_tracked = existing_chat.is_tracked if existing_chat else False
-
-                # Добавляем в список для отображения
-                chat_list.append({"id": chat_id, "title": title, "is_tracked": is_tracked})
-
-        logger.info("Фиксация транзакции...")
-        await db.commit()  # Сохраняем изменения
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке: {e}")
-        return HTMLResponse(content="Ошибка получения чатов.", status_code=500)
-
-    return templates.TemplateResponse("user/success.html", {"request": request, "chat_list": chat_list})
 
 
 
