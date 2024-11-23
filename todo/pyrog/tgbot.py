@@ -84,6 +84,7 @@ class TelegramClientManager:
             if callable(coro):
                 coro = coro()
             logger.info(f"Выполнение корутины: {coro}")
+            print(f"Выполнение корутины: {coro} из класса TelegramClientManager")
             return await coro
 
         async with self.lock:
@@ -160,12 +161,14 @@ async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
             logger.info("Запуск проверки чатов...")
             dialogs = []
 
-            # Получение всех чатов из Telegram
-            async with telegram_manager.client:
+            # Получение всех чатов из Telegram через safe_call
+            async def fetch_dialogs():
                 async for dialog in telegram_manager.client.iter_dialogs():
                     chat_id = dialog.id
                     title = dialog.name or "Без названия"
                     dialogs.append({"chat_id": chat_id, "title": title.strip()})
+            
+            await telegram_manager.safe_call(fetch_dialogs)
 
             logger.info(f"Загружено {len(dialogs)} диалогов из Telegram.")
 
@@ -201,6 +204,7 @@ async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
             await db.rollback()
         finally:
             await asyncio.sleep(interval)
+
 
 
 
@@ -375,42 +379,6 @@ async def home(request: Request):
 
 
 #обращения к БД и вывод таблиц
-
-#не уверен что этот роутер работает update_tracked
-@tg_router.post("/update_tracked")
-async def update_tracked_chats(
-    request: Request,
-    chat_ids: list[int] = Form(...),
-    db: AsyncSession = Depends(get_db)
-):
-    """
-    Обновление статуса выбранных чатов (is_tracked).
-    Устанавливает is_tracked=True для выбранных чатов и is_tracked=False для остальных.
-    """
-    try:
-        # Устанавливаем is_tracked=True для выбранных чатов
-        if chat_ids:
-            await db.execute(
-                update(Chat)
-                .where(Chat.chat_id.in_(chat_ids))
-                .values(is_tracked=True, last_updated=datetime.utcnow())
-            )
-        
-        # Устанавливаем is_tracked=False для остальных чатов
-        await db.execute(
-            update(Chat)
-            .where(~Chat.chat_id.in_(chat_ids))  # Чаты, не входящие в выбранные
-            .values(is_tracked=False, last_updated=datetime.utcnow())
-        )
-        
-        await db.commit()
-
-    except Exception as e:
-        logger.error(f"Ошибка обновления отслеживаемых чатов: {e}")
-        return HTMLResponse(content="Ошибка обновления отслеживаемых чатов.", status_code=500)
-
-    # Перенаправляем на главную страницу
-    return RedirectResponse(url="/", status_code=302)
 
 
 @tg_router.api_route("/all_chat", methods=["GET", "POST"], response_class=HTMLResponse)
