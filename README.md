@@ -13,4 +13,6 @@ run - файл run.py, содержащий объект приложения ap
 uvicorn main:app --reload --port 5000
 
 
-
+убить процессы lsof -i :5000
+kill -9 14734
+kill -9 14736

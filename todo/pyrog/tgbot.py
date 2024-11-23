@@ -1,6 +1,9 @@
 from fastapi import APIRouter, Request, Form, Response, Depends, FastAPI
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
+from fastapi.responses import RedirectResponse
+from fastapi.requests import Request
+
 from telethon import TelegramClient
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from fastapi import Depends
@@ -12,6 +15,7 @@ from sqlalchemy.future import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.expression import bindparam
 from sqlalchemy.sql import text
+
 
 from dotenv import load_dotenv, set_key
 from itsdangerous import URLSafeSerializer
@@ -40,6 +44,15 @@ serializer = URLSafeSerializer(SECRET_KEY)
 tg_router = APIRouter()
 templates = Jinja2Templates(directory='todo/templates')
 
+# FastAPI приложение
+app = FastAPI()
+
+# Подключение роутера к приложению
+app.include_router(tg_router)
+
+
+
+
 # Telegram Client Manager
 class TelegramClientManager:
     def __init__(self, session_name, api_id, api_hash):
@@ -49,6 +62,7 @@ class TelegramClientManager:
     async def start(self):
         if not self.client.is_connected():
             await self.client.connect()
+            print(f"-Запуск ТГ и соединение из класса TelegramClientManager, сессия: {session_name}")
             logger.info("Telegram client connected.")
             # Проверяем авторизацию
             if not await self.client.is_user_authorized():
@@ -57,13 +71,16 @@ class TelegramClientManager:
     async def stop(self):
         if self.client.is_connected():
             await self.client.disconnect()
+            print("Выкл ТГ и разрыв соединение из класса TelegramClientManager")
             logger.info("Telegram client disconnected.")
 
     async def safe_call(self, coro):
         async with self.lock:
             if not self.client.is_connected():
                 logger.info("Клиент не подключен. Подключаем...")
+                print("проверка подключения не подключены из класса TelegramClientManager")
                 await self.start()
+                print("соединение востановлено из класса TelegramClientManager")
             if callable(coro):
                 coro = coro()
             logger.info(f"Выполнение корутины: {coro}")
@@ -77,6 +94,7 @@ class TelegramClientManager:
                 coro = coro()
             logger.info(f"Выполнение корутины: {coro}")
             return await coro
+
 
 
 # Глобальная настройка менеджера клиента
@@ -85,20 +103,8 @@ api_hash = os.getenv("API_HASH")
 session_name = "session_my_account"
 telegram_manager = TelegramClientManager(session_name, api_id, api_hash)
 
-# FastAPI приложение
-app = FastAPI()
 
-# Подключение роутера к приложению
-app.include_router(tg_router)
 
-@app.on_event("startup")
-async def startup_event():
-    await telegram_manager.start()
-    telegram_manager.run_in_background()
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await telegram_manager.stop()
 
 client_data = {}
 
@@ -212,26 +218,56 @@ async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
 
 
 
-
+#Отвечает за авторизацию (нужно добавить проверок на сессию и на подключение)
 @tg_router.get("/login", response_class=HTMLResponse, name="login")
-async def login(response: Response):
+async def login(response: Response, manager: TelegramClientManager = Depends(lambda: telegram_manager)):
     try:
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            user = await client.get_me()
-            if user:
-                auth_token = serializer.dumps({"authenticated": True})
-                response = RedirectResponse(url="/success", status_code=303)
-                response.set_cookie(key="auth_token", value=auth_token)
-                return response
-            else:
-                return JSONResponse(content={"status": "Сессия не авторизована. Пожалуйста, выполните авторизацию заново."}, status_code=400)
+        # Используем safe_call для безопасного вызова client.get_me
+        user = await manager.safe_call(manager.client.get_me)
+        
+        if user:
+            # Формируем сообщение с датой, временем и упоминанием роутера
+            current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            message_text = f"Сообщение из роутера /login\nДата и время: {current_time}"
+
+            # Отправляем сообщение в "Избранное"
+            await manager.safe_call(
+                lambda: manager.client.send_message("me", message_text)
+            )
+
+            # Авторизация успешна, перенаправляем
+            auth_token = serializer.dumps({"authenticated": True})
+            redirect_response = RedirectResponse(url="/", status_code=303)
+            redirect_response.set_cookie(key="auth_token", value=auth_token)
+            return redirect_response
+        else:
+            # Сессия не авторизована
+            return JSONResponse(
+                content={"status": "Сессия не авторизована. Пожалуйста, выполните авторизацию заново."},
+                status_code=400
+            )
     except Exception as e:
-        logger.error(f"Ошибка при подключении с использованием сессии: {e}")
+        logger.error(f"Ошибка при подключении через TelegramClientManager: {e}")
         return JSONResponse(content={"status": f"Ошибка: {str(e)}"}, status_code=500)
 
 
+
+
+#Открывает страницу регистрации.
+@tg_router.get("/register", response_class=HTMLResponse)
+async def register(request: Request, manager: TelegramClientManager = Depends(lambda: telegram_manager)):
+    try:
+        await manager.safe_call(manager.start)  # Убедимся, что клиент подключен
+        logger.info("Инициализация Telegram клиента завершена.")
+    except Exception as e:
+        logger.error(f"Ошибка при инициализации Telegram клиента: {e}")
+        return HTMLResponse(content="Ошибка при инициализации Telegram клиента.", status_code=500)
+
+    return templates.TemplateResponse("user/authotg.html", {"request": request})
+
+#Принимает номер телефона, отправляет код подтверждения и перенаправляет на /verify.
 @tg_router.post("/send_code", response_class=HTMLResponse)
-async def send_code(request: Request):
+async def send_code(request: Request, manager: TelegramClientManager = Depends(lambda: telegram_manager)):
     logger.info("Маршрут /send_code вызван.")
 
     form = await request.form()
@@ -244,7 +280,7 @@ async def send_code(request: Request):
 
     try:
         # Отправка кода через Telethon
-        sent_code = await telegram_manager.safe_call(lambda: telegram_manager.client.send_code_request(phone))
+        sent_code = await manager.safe_call(lambda: manager.client.send_code_request(phone))
         logger.info(f"Код подтверждения отправлен: {sent_code.phone_code_hash}")
 
         # Сохраняем информацию о сессии
@@ -258,8 +294,18 @@ async def send_code(request: Request):
 
 
 
+# Показывает страницу ввода кода подтверждения с указанным номером телефона.
+@tg_router.get("/verify", response_class=HTMLResponse)
+async def verify_page(request: Request):
+    phone = request.query_params.get("phone")
+    return templates.TemplateResponse("user/verify.html", {"request": request, "phone": phone})
+
+
+
+""" Принимает код подтверждения и авторизует пользователя. 
+    Успешная авторизация перенаправляет на главную страницу."""
 @tg_router.post("/verify_code", response_class=HTMLResponse)
-async def verify_code(request: Request):
+async def verify_code(request: Request, manager: TelegramClientManager = Depends(lambda: telegram_manager)):
     form = await request.form()
     phone = form.get("phone")
     code = form.get("code")
@@ -273,11 +319,12 @@ async def verify_code(request: Request):
 
     try:
         # Подтверждаем код
-        await telegram_manager.safe_call(lambda: telegram_manager.client.sign_in(phone=phone, code=code))
+        await manager.safe_call(lambda: manager.client.sign_in(phone=phone, code=code))
         logger.info("Авторизация успешна!")
 
+        # Устанавливаем cookie и перенаправляем на главную
         auth_token = serializer.dumps({"authenticated": True})
-        response = RedirectResponse(url=f"/success?phone={phone}", status_code=303)
+        response = RedirectResponse(url="/", status_code=303)
         response.set_cookie(key="auth_token", value=auth_token)
         return response
     except Exception as e:
@@ -285,107 +332,27 @@ async def verify_code(request: Request):
         return JSONResponse(content={"status": f"Ошибка: {str(e)}"}, status_code=500)
 
 
-@tg_router.get("/success", response_class=HTMLResponse, name="success")
-async def success_page(request: Request, db: AsyncSession = Depends(get_db)):
-    auth_token = request.cookies.get("auth_token")
-    if not auth_token:
-        return HTMLResponse(content="Не авторизован.", status_code=401)
-
-    try:
-        data = serializer.loads(auth_token)
-        if not data.get("authenticated", False):
-            return HTMLResponse(content="Не авторизован.", status_code=401)
-    except Exception:
-        return HTMLResponse(content="Не авторизован.", status_code=401)
-
-    chat_list = []
-
-    try:
-        # Подключение к Telegram API
-        dialogs = []
-        async with TelegramClient(session_name, api_id, api_hash) as client:
-            logger.info("Получение списка чатов...")
-            async for dialog in client.iter_dialogs():
-                chat_id = str(dialog.id)  # Преобразуем в строку
-                title = dialog.name or "Без названия"
-                dialogs.append({"chat_id": chat_id, "title": title})
-
-        # Обработка данных в транзакции
-        async with db.begin():  # Убедимся, что транзакция завершится корректно
-            for dialog in dialogs:
-                chat_id = int(dialog["chat_id"])  # Приведение типа
-                title = dialog["title"].strip()
-
-                if not title:
-                    logger.warning(f"Пропущен диалог с chat_id: {chat_id}, так как отсутствует название.")
-                    continue
-
-                # Проверяем существование чата
-                result = await db.execute(
-                    select(Chat).where(Chat.chat_id == chat_id).options(selectinload(Chat.history))
-                )
-                existing_chat = result.scalar_one_or_none()
-
-                if existing_chat:
-                    # Обновляем только если название изменилось
-                    if existing_chat.title.strip().lower() != title.lower():
-                        logger.info(f"Обновление названия чата: {existing_chat.title} -> {title}")
-                        chat_history = ChatNameHistory(
-                            chat_id=existing_chat.id,
-                            old_title=existing_chat.title,
-                            new_title=title,
-                            updated_at=datetime.utcnow(),
-                            is_title_changed=True,
-                        )
-                        existing_chat.title = title
-                        db.add(chat_history)
-                else:
-                    # Добавление нового чата
-                    logger.info(f"Добавление нового чата: {title}")
-                    new_chat = Chat(
-                        chat_id=chat_id,
-                        title=title,
-                        last_updated=datetime.utcnow(),
-                        is_title_changed=False,
-                    )
-                    db.add(new_chat)
-
-                # Определяем, отслеживается ли чат
-                is_tracked = existing_chat.is_tracked if existing_chat else False
-
-                # Добавляем в список для отображения
-                chat_list.append({"id": chat_id, "title": title, "is_tracked": is_tracked})
-
-        logger.info("Фиксация транзакции...")
-        await db.commit()  # Сохраняем изменения
-
-    except Exception as e:
-        logger.error(f"Ошибка при обработке: {e}")
-        return HTMLResponse(content="Ошибка получения чатов.", status_code=500)
-
-    return templates.TemplateResponse("user/success.html", {"request": request, "chat_list": chat_list})
 
 
 
-
-
-
-
-# Роут для отображения страницы подтверждения кода
-@tg_router.get("/verify", response_class=HTMLResponse)
-async def verify_page(request: Request):
-    phone = request.query_params.get("phone")
-    return templates.TemplateResponse("user/verify.html", {"request": request, "phone": phone})
-
-
-# Дополнительные роуты
+# Закрытие сессии Telegram, Перенаправляет пользователя на главную страницу
 @tg_router.get("/logout", response_class=HTMLResponse)
-async def logout(response: Response):
-    response = RedirectResponse(url="/")
-    response.delete_cookie("auth_token")
-    return response
+async def logout(response: Response, manager: TelegramClientManager = Depends(lambda: telegram_manager)):
+    try:
+        # Закрываем сессию Telegram через TelegramClientManager
+        await manager.safe_call(manager.stop)
+        logger.info("Сессия Telegram успешно закрыта.")
+    except Exception as e:
+        logger.error(f"Ошибка при закрытии сессии Telegram: {e}")
+        # Даже если ошибка произошла, продолжим выполнение, чтобы удалить cookie
+
+    # Удаляем cookie авторизации и перенаправляем на главную страницу
+    redirect_response = RedirectResponse(url="/", status_code=303)
+    redirect_response.delete_cookie("auth_token")
+    return redirect_response
 
 
+#Переход на главную
 @tg_router.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     auth_token = request.cookies.get("auth_token")
@@ -399,24 +366,17 @@ async def home(request: Request):
     return templates.TemplateResponse('main/index.html', {"request": request, "is_authenticated": is_authenticated})
 
 
-@tg_router.get("/register", response_class=HTMLResponse)
-async def register(request: Request):
-    try:
-        #await init_db()  # Создаем таблицы, если их нет
-        logger.info("Инициализация базы данных завершена.")
-    except Exception as e:
-        logger.error(f"Ошибка при инициализации базы данных: {e}")
-        return HTMLResponse(content="Ошибка при инициализации базы данных.", status_code=500)
-
-    return templates.TemplateResponse("user/authotg.html", {"request": request})
 
 
 
 
 
-from fastapi.responses import RedirectResponse
-from fastapi.requests import Request
 
+
+
+#обращения к БД и вывод таблиц
+
+#не уверен что этот роутер работает update_tracked
 @tg_router.post("/update_tracked")
 async def update_tracked_chats(
     request: Request,
@@ -510,13 +470,6 @@ async def all_chat(request: Request, db: AsyncSession = Depends(get_db)):
         except Exception as e:
             logger.error(f"Ошибка при обновлении статуса чатов: {e}")
             return HTMLResponse(content="Ошибка обновления статуса чатов.", status_code=500)
-
-
-
-
-
-
-
 
 @tg_router.get("/chat_is_tracked", response_class=HTMLResponse)
 async def get_tracked_chats(request: Request, db: AsyncSession = Depends(get_db)):
@@ -649,10 +602,5 @@ async def chat_name_history_page(
     except Exception as e:
         logger.error(f"Ошибка при загрузке истории чатов: {e}")
         return HTMLResponse(content="Ошибка загрузки истории чатов.", status_code=500)
-
-
-
-
-
 
 
