@@ -437,59 +437,6 @@ async def all_chat(request: Request, db: AsyncSession = Depends(get_db)):
             return HTMLResponse(content="Ошибка обновления статуса чатов.", status_code=500)
 
 
-@tg_router.get("/chat_is_tracked", response_class=HTMLResponse)
-async def get_tracked_chats(request: Request, db: AsyncSession = Depends(get_db)):
-    """
-    Возвращает страницу со списком чатов, где is_tracked=True,
-    и обновляет информацию о смене названия.
-    """
-    try:
-        # Извлекаем чаты с is_tracked=True
-        result = await db.execute(select(Chat).where(Chat.is_tracked == True))
-        tracked_chats = result.scalars().all()
-
-        # Список для обновления статуса is_title_changed
-        updated_chats = []
-
-        for chat in tracked_chats:
-            # Проверяем, есть ли записи об изменении названия
-            result_history = await db.execute(
-                select(ChatNameHistory)
-                .where(ChatNameHistory.chat_id == chat.id)
-                .order_by(ChatNameHistory.updated_at.desc())
-            )
-            has_name_change = result_history.scalars().first() is not None
-
-            # Обновляем поле is_title_changed, если оно изменилось
-            if chat.is_title_changed != has_name_change:
-                chat.is_title_changed = has_name_change
-                updated_chats.append(chat)
-
-        # Сохраняем обновления в базе данных одним коммитом
-        if updated_chats:
-            db.add_all(updated_chats)
-            await db.commit()
-
-        # Создаём список чатов для отображения
-        chat_list = [
-            {
-                "id": chat.id,
-                "chat_id": chat.chat_id,
-                "title": chat.title,
-                "is_tracked": chat.is_tracked,
-                "is_title_changed": chat.is_title_changed,
-            }
-            for chat in tracked_chats
-        ]
-
-        # Передаём данные в шаблон
-        return templates.TemplateResponse(
-            "post/chat_is_tracked.html",
-            {"request": request, "chat_list": chat_list}
-        )
-    except Exception as e:
-        logger.error(f"Ошибка при загрузке отслеживаемых чатов: {e}")
-        return HTMLResponse(content="Ошибка загрузки отслеживаемых чатов.", status_code=500)
 
 
 

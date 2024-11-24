@@ -57,7 +57,7 @@ async def on_startup():
     await handle_temp_table(session)
 
     # Запускаем фоновую задачу для обновления чатов
-    #asyncio.create_task(fetch_new_chats_periodically(session, interval=60))  # Интервал 60 секунд (1 минута)
+    asyncio.create_task(fetch_new_chats_periodically(session, interval=60))  # Интервал 60 секунд (1 минута)
 
 
 
