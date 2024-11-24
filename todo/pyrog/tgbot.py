@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from todo.database.base import get_db
-from todo.models import Chat, ChatNameHistory
+from todo.models import Chat, ChatNameHistory, TrackedChat
 from datetime import datetime
 import asyncio
 import os
@@ -416,20 +416,17 @@ async def all_chat(request: Request, db: AsyncSession = Depends(get_db)):
             selected_chat_ids = form.getlist("chat_ids")
             selected_chat_ids = [int(chat_id) for chat_id in selected_chat_ids]
 
-            # Устанавливаем is_tracked=True для выбранных чатов
-            if selected_chat_ids:
-                await db.execute(
-                    update(Chat)
-                    .where(Chat.id.in_(selected_chat_ids))
-                    .values(is_tracked=True, last_updated=datetime.utcnow())
-                )
+            # Извлекаем все чаты для изменения
+            result = await db.execute(select(Chat))
+            chats = result.scalars().all()
 
-            # Устанавливаем is_tracked=False для остальных чатов
-            await db.execute(
-                update(Chat)
-                .where(~Chat.id.in_(selected_chat_ids))
-                .values(is_tracked=False, last_updated=datetime.utcnow())
-            )
+            # Обновляем is_tracked для выбранных и остальных чатов
+            for chat in chats:
+                if chat.id in selected_chat_ids:
+                    chat.is_tracked = True
+                else:
+                    chat.is_tracked = False
+                chat.last_updated = datetime.utcnow()
 
             # Фиксируем изменения
             await db.commit()
@@ -438,6 +435,7 @@ async def all_chat(request: Request, db: AsyncSession = Depends(get_db)):
         except Exception as e:
             logger.error(f"Ошибка при обновлении статуса чатов: {e}")
             return HTMLResponse(content="Ошибка обновления статуса чатов.", status_code=500)
+
 
 @tg_router.get("/chat_is_tracked", response_class=HTMLResponse)
 async def get_tracked_chats(request: Request, db: AsyncSession = Depends(get_db)):
@@ -572,3 +570,70 @@ async def chat_name_history_page(
         return HTMLResponse(content="Ошибка загрузки истории чатов.", status_code=500)
 
 
+@tg_router.get("/tracked_chats", response_class=HTMLResponse)
+async def tracked_chats_page(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    search: str = None,
+    sort_by: str = "chat_id",  # Поле для сортировки
+    order: str = "asc",       # Порядок сортировки: "asc" или "desc"
+):
+    """
+    Отображение страницы с отслеживаемыми чатами.
+
+    Аргументы:
+        request (Request): Запрос FastAPI.
+        db (AsyncSession): Сессия базы данных.
+        search (str): Поисковый запрос для фильтрации чатов (опционально).
+        sort_by (str): Поле для сортировки (по умолчанию chat_id).
+        order (str): Порядок сортировки ("asc" или "desc").
+
+    Возвращает:
+        HTMLResponse: Шаблон с отслеживаемыми чатами.
+    """
+    try:
+        # Создаём базовый запрос к таблице TrackedChat
+        query = select(TrackedChat)
+
+        # Добавляем фильтрацию по поисковому запросу, если указано
+        if search:
+            query = query.where(
+                (TrackedChat.title.ilike(f"%{search}%")) |
+                (TrackedChat.chat_id.ilike(f"%{search}%"))
+            )
+
+        # Добавляем сортировку
+        if sort_by in ["chat_id", "title", "last_updated"]:
+            order_by_field = getattr(TrackedChat, sort_by)
+            query = query.order_by(order_by_field.asc() if order == "asc" else order_by_field.desc())
+
+        # Выполняем запрос
+        result = await db.execute(query)
+        rows = result.all()
+
+        # Формируем список чатов для шаблона
+        chat_list = [
+            {
+                "chat_id": chat.chat_id,
+                "title": chat.title,
+                "last_updated": chat.last_updated,
+                "is_title_changed": chat.is_title_changed,
+            }
+            for chat, in rows  # Кома обязательна, чтобы извлечь кортеж (TrackedChat,)
+        ]
+
+        # Передаём данные в шаблон
+        return templates.TemplateResponse(
+            "post/tracked_chats.html",
+            {
+                "request": request,
+                "chat_history_list": chat_list,
+                "search": search,
+                "sort_by": sort_by,
+                "order": order,
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке отслеживаемых чатов: {e}")
+        return HTMLResponse(content="Ошибка загрузки отслеживаемых чатов.", status_code=500)

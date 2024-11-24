@@ -29,6 +29,9 @@ class Chat(Base):
 
     # Связь с Message
     messages = relationship("Message", back_populates="chat", cascade="all, delete-orphan")
+    
+    # Связь с TrackedChat (добавлено)
+    tracked_chats = relationship("TrackedChat", back_populates="chat", cascade="all, delete-orphan")
 
 
 # Модель ChatNameHistory
@@ -45,6 +48,18 @@ class ChatNameHistory(Base):
 
     # Связь с Chat
     chat = relationship("Chat", back_populates="history")
+
+class TrackedChat(Base):
+    __tablename__ = "TrackedChat"
+
+    id = Column(BigInteger, primary_key=True, index=True)  # Уникальный идентификатор
+    chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False, unique=True)  # Уникальный chat_id
+    title = Column(String, nullable=True)  # Название чата
+    last_updated = Column(TIMESTAMP(timezone=True), server_default=func.now())  # Дата последнего обновления
+    is_title_changed = Column(Boolean, default=False)  # Флаг изменения названия
+
+    # Связь с таблицей Chat
+    chat = relationship("Chat", back_populates="tracked_chats")
 
 
 # Модель Message
@@ -91,20 +106,75 @@ class MessageEdit(Base):
 
 
 # События SQLAlchemy для синхронизации
+from sqlalchemy.dialects.postgresql import insert
+
 @event.listens_for(Chat, "after_update")
-def sync_chat_to_history(mapper, connection, target):
-    logger.info(f"Triggered sync_chat_to_history for Chat ID {target.id}")
+def sync_chat_events(mapper, connection, target):
+    """
+    Объединяет логику синхронизации данных между Chat, ChatNameHistory и TrackedChat.
+    """
+    logger.info(f"Triggered sync_chat_events for Chat ID {target.id}")
+    print(f"Triggered sync_chat_events for Chat ID {target.id}")
+    
     if sync_in_progress.get():
+        logger.info("Sync already in progress. Skipping.")
+        print("Sync already in progress. Skipping.")
         return
+    
     try:
         sync_in_progress.set(True)
-        connection.execute(
+        
+        # Синхронизация с ChatNameHistory
+        logger.info(f"Updating ChatNameHistory for chat_id {target.id} with is_tracked={target.is_tracked}")
+        print(f"Updating ChatNameHistory for chat_id {target.id} with is_tracked={target.is_tracked}")
+        result_history = connection.execute(
             ChatNameHistory.__table__.update()
             .where(ChatNameHistory.chat_id == target.id)
             .values(is_tracked=target.is_tracked)
         )
+        logger.info(f"Rows affected in ChatNameHistory: {result_history.rowcount}")
+        print(f"Rows affected in ChatNameHistory: {result_history.rowcount}")
+        
+        # Синхронизация с TrackedChat
+        if target.is_tracked:
+            logger.info(f"Adding/updating TrackedChat for chat_id {target.chat_id}")
+            print(f"Adding/updating TrackedChat for chat_id {target.chat_id}")
+            
+            # Используем insert с конфликтной политикой
+            insert_stmt = insert(TrackedChat.__table__).values(
+                chat_id=target.chat_id,
+                title=target.title,
+                last_updated=target.last_updated,
+                is_title_changed=target.is_title_changed
+            )
+            update_stmt = insert_stmt.on_conflict_do_update(
+                index_elements=["chat_id"],
+                set_={
+                    "title": target.title,
+                    "last_updated": target.last_updated,
+                    "is_title_changed": target.is_title_changed,
+                }
+            )
+            result_tracked = connection.execute(update_stmt)
+            logger.info(f"TrackedChat rows affected: {result_tracked.rowcount}")
+            print(f"TrackedChat rows affected: {result_tracked.rowcount}")
+        else:
+            logger.info(f"Deleting from TrackedChat for chat_id {target.chat_id}")
+            print(f"Deleting from TrackedChat for chat_id {target.chat_id}")
+            result_delete = connection.execute(
+                TrackedChat.__table__.delete()
+                .where(TrackedChat.chat_id == target.chat_id)
+            )
+            logger.info(f"Rows deleted from TrackedChat: {result_delete.rowcount}")
+            print(f"Rows deleted from TrackedChat: {result_delete.rowcount}")
+    
     finally:
         sync_in_progress.set(False)
+        logger.info("Sync complete.")
+        print("Sync complete.")
+
+
+
 
 
 @event.listens_for(ChatNameHistory, "after_update")
@@ -122,6 +192,14 @@ def sync_history_to_chat(mapper, connection, target):
             )
     finally:
         sync_in_progress.set(False)
+
+
+
+
+
+
+
+
 
 
 # Хранимая процедура и временные таблицы

@@ -1,0 +1,90 @@
+{% extends 'main/base.html' %}
+
+{% block content %}
+<p class="text-center">История изменений чатов. Используйте поиск или сортировку для фильтрации данных.</p>
+<form method="GET" action="/tracked_chats" class="mb-4">
+    <div class="form-group mb-3">
+        <input 
+            type="text" 
+            id="searchInput" 
+            class="form-control" 
+            name="search"
+            placeholder="Поиск по названию или ID" 
+            value="{{ search|default('') }}"
+            onkeyup="debouncedFilterTable()">
+    </div>
+    <table class="table" id="chatTable">
+        <thead>
+            <tr>
+                <th>#</th>
+                <th onclick="sortTable(1)" style="cursor:pointer;">ID Чата &#x25B2;&#x25BC;</th>
+                <th onclick="sortTable(2)" style="cursor:pointer;">Название &#x25B2;&#x25BC;</th>
+                <th onclick="sortTable(3)" style="cursor:pointer;">Дата обновления &#x25B2;&#x25BC;</th>
+                <th onclick="sortTable(4)" style="cursor:pointer;">Изменённое название &#x25B2;&#x25BC;</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for chat in chat_history_list %}
+            <tr>
+                <td>{{ loop.index }}</td>
+                <td>{{ chat.chat_id }}</td>
+                <td>{{ chat.title }}</td>
+                <td>{{ chat.last_updated.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+                <td>{{ "Да" if chat.is_title_changed else "Нет" }}</td>
+            </tr>
+            {% else %}
+            <tr>
+                <td colspan="5" class="text-center">Нет данных для отображения</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>    
+</form>
+
+<script>
+    let searchTimeout;
+
+    function filterTable() {
+        const input = document.getElementById('searchInput');
+        const filter = input.value.toLowerCase();
+        const table = document.getElementById('chatTable');
+        const rows = table.getElementsByTagName('tr');
+        
+        for (let i = 1; i < rows.length; i++) {
+            const cells = rows[i].getElementsByTagName('td');
+            let match = false;
+            for (let j = 1; j < cells.length; j++) {
+                if (cells[j].innerText.toLowerCase().includes(filter)) {
+                    match = true;
+                    break;
+                }
+            }
+            rows[i].style.display = match ? '' : 'none';
+        }
+    }
+
+    function debouncedFilterTable() {
+        clearTimeout(searchTimeout);
+        searchTimeout = setTimeout(filterTable, 500);
+    }
+
+    function sortTable(columnIndex) {
+        const table = document.getElementById('chatTable');
+        const rows = Array.from(table.rows).slice(1);
+        const isAscending = table.dataset.sortOrder === 'asc';
+        table.dataset.sortOrder = isAscending ? 'desc' : 'asc';
+        
+        rows.sort((a, b) => {
+            const aText = a.cells[columnIndex].innerText.trim();
+            const bText = b.cells[columnIndex].innerText.trim();
+            
+            if (!isNaN(aText) && !isNaN(bText)) {
+                return isAscending ? aText - bText : bText - aText;
+            }
+            return isAscending ? aText.localeCompare(bText) : bText.localeCompare(aText);
+        });
+        
+        rows.forEach(row => table.tBodies[0].appendChild(row));
+    }
+</script>
+{% endblock %}
