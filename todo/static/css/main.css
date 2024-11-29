@@ -19,10 +19,11 @@ body {
 }
 
 .content {
-    max-width: 800px;
-    margin: 0 auto;
-    padding: 40px 20px;
-    flex: 1 1 auto;
+    width: 100%; /* Растянуть содержимое на всю ширину */
+    max-width: none; /* Убрать ограничение ширины */
+    margin: 0; /* Убрать автоматическое центрирование */
+    padding: 20px; /* Добавить отступы для эстетики */
+    box-sizing: border-box; /* Учитывать отступы в ширине */
 }
 
 h1 {

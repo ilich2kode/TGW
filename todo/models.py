@@ -1,11 +1,12 @@
 from sqlalchemy import (
     Column, String, Integer, Boolean, ForeignKey, TIMESTAMP, BigInteger, JSON, func, event, text
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, validates
 from sqlalchemy.ext.asyncio import AsyncSession
 from contextvars import ContextVar
 import logging
 from todo.database.base import Base  # Используем Base из base.py
+from sqlalchemy.dialects.postgresql import insert
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -68,6 +69,8 @@ class Message(Base):
 
     id = Column(BigInteger, primary_key=True, index=True)  # Уникальный ID сообщения
     chat_id = Column(BigInteger, ForeignKey("chats.chat_id", ondelete="CASCADE"), nullable=False)  # Привязка к таблице chats
+    message_id = Column(BigInteger, nullable=False)  # Неуникальный идентификатор сообщения
+    unique_message = Column(String, nullable=False, unique=True, index=True)  # Поле для хранения комбинированного значения chat_id и message_id
     from_id = Column(BigInteger, nullable=True)  # ID отправителя
     text = Column(String, nullable=True)  # Текст сообщения
     date = Column(TIMESTAMP(timezone=True), nullable=False)  # Дата отправки
@@ -87,13 +90,26 @@ class Message(Base):
     # Связь с MessageEdit
     edits = relationship("MessageEdit", back_populates="message", cascade="all, delete-orphan")
 
+    # Генерация комбинированного поля
+    @staticmethod
+    def generate_combined(chat_id, message_id):
+        return f"{chat_id}_{message_id}"
+
+    # Метод, который выполняется перед сохранением
+    @validates('chat_id', 'message_id')
+    def update_combined_field(self, key, value):
+        setattr(self, key, value)
+        if self.chat_id is not None and self.message_id is not None:
+            self.unique_message = self.generate_combined(self.chat_id, self.message_id)
+        return value
+
 
 # Модель MessageEdit
 class MessageEdit(Base):
     __tablename__ = "message_edits"
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)  # Уникальный идентификатор записи
-    message_id = Column(BigInteger, ForeignKey("messages.id", ondelete="CASCADE"), nullable=False)  # Привязка к сообщениям
+    unique_message = Column(String, ForeignKey("messages.unique_message", ondelete="CASCADE"), nullable=False)  # Привязка к сообщениям по уникальному идентификатору
     old_date = Column(TIMESTAMP(timezone=True), nullable=False)  # Дата и время старого сообщения
     edit_date = Column(TIMESTAMP(timezone=True), nullable=False)  # Дата и время редактирования
     old_text = Column(String, nullable=True)  # Старый текст сообщения
@@ -105,8 +121,9 @@ class MessageEdit(Base):
     message = relationship("Message", back_populates="edits")
 
 
-# События SQLAlchemy для синхронизации
-from sqlalchemy.dialects.postgresql import insert
+
+
+
 
 @event.listens_for(Chat, "after_update")
 def sync_chat_events(mapper, connection, target):
