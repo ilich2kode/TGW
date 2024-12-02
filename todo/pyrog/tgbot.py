@@ -4,18 +4,24 @@ from fastapi.templating import Jinja2Templates
 from fastapi.responses import RedirectResponse
 from fastapi.requests import Request
 
-from telethon import TelegramClient
+from telethon.tl.types import PeerUser, PeerChannel
+from telethon.errors import ChatAdminRequiredError, UserNotParticipantError
+from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from fastapi import Depends
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm import joinedload
 from typing import List
 from sqlalchemy import update
 from sqlalchemy.future import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.expression import bindparam
 from sqlalchemy.sql import text
+from sqlalchemy.util import await_only
 
+from sqlalchemy import insert
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from dotenv import load_dotenv, set_key
 from itsdangerous import URLSafeSerializer
@@ -23,8 +29,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 from todo.database.base import get_db
-from todo.models import Chat, ChatNameHistory, TrackedChat
-from datetime import datetime
+from todo.database.base import SessionLocal  # Импорт существующей фабрики сессий
+
+from todo.models import Chat, ChatNameHistory, TrackedChat, Message, MessageEdit
+from datetime import datetime, timedelta, timezone
+from tzlocal import get_localzone
 import asyncio
 import os
 import logging
@@ -53,6 +62,11 @@ app.include_router(tg_router)
 
 
 
+
+
+
+
+
 # Telegram Client Manager
 class TelegramClientManager:
     def __init__(self, session_name, api_id, api_hash):
@@ -71,7 +85,7 @@ class TelegramClientManager:
     async def stop(self):
         if self.client.is_connected():
             await self.client.disconnect()
-            print("Выкл ТГ и разрыв соединение из класса TelegramClientManager")
+            print("Выкл ТГ и разрыв соединения из класса TelegramClientManager")
             logger.info("Telegram client disconnected.")
 
     async def safe_call(self, coro):
@@ -80,21 +94,13 @@ class TelegramClientManager:
                 logger.info("Клиент не подключен. Подключаем...")
                 print("проверка подключения не подключены из класса TelegramClientManager")
                 await self.start()
-                print("соединение востановлено из класса TelegramClientManager")
+                print("соединение восстановлено из класса TelegramClientManager")
             if callable(coro):
                 coro = coro()
             logger.info(f"Выполнение корутины: {coro}")
             print(f"Выполнение корутины: {coro} из класса TelegramClientManager")
             return await coro
 
-        async with self.lock:
-            if not self.client.is_connected():
-                logger.info("Клиент не подключен. Подключаем...")
-                await self.start()
-            if callable(coro):
-                coro = coro()
-            logger.info(f"Выполнение корутины: {coro}")
-            return await coro
 
 
 
@@ -103,6 +109,8 @@ api_id = int(os.getenv("API_ID"))
 api_hash = os.getenv("API_HASH")
 session_name = "session_my_account"
 telegram_manager = TelegramClientManager(session_name, api_id, api_hash)
+
+
 
 
 
@@ -207,16 +215,268 @@ async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
 
 
 
+###############################################################################
+
+
+MESSAGE_FETCH_LIMIT = 50
+
+def prepare_message_data(chat_id, message):
+    """
+    Подготавливает данные сообщения для вставки в базу данных.
+    """
+    def get_from_id(from_id):
+        """Извлекает идентификатор из объекта PeerUser или PeerChannel."""
+        if from_id is None:
+            return None
+        if isinstance(from_id, (PeerUser, PeerChannel)):
+            return from_id.user_id if hasattr(from_id, 'user_id') else from_id.channel_id
+        return from_id
+
+    return {
+        "chat_id": chat_id,
+        "message_id": message.id,
+        "unique_message": Message.generate_combined(chat_id, message.id),
+        "from_id": get_from_id(message.from_id),
+        "text": message.message or "",
+        "date": message.date,
+        "edit_date": message.edit_date,
+        "reply_to": message.reply_to_msg_id,
+        "is_forward": bool(message.fwd_from),
+        "is_reply": bool(message.reply_to_msg_id),
+        "is_pinned": message.pinned,
+        "post_author": message.post_author,
+        "grouped_id": message.grouped_id,
+        "has_media": bool(message.media),
+    }
+    
+    
+
+async def fetch_missing_messages(session):
+    print("Инициализация: Проверка и загрузка недостающих сообщений")
+    error_log_path = "chat_access_errors.txt"
+
+    try:
+        # Получение всех отслеживаемых чатов
+        tracked_chats = await session.execute(TrackedChat.__table__.select())
+        tracked_chats = tracked_chats.fetchall()
+
+        if not tracked_chats:
+            print("Нет отслеживаемых чатов.")
+            return
+
+        print(f"Найдено {len(tracked_chats)} отслеживаемых чатов.")
+
+        for chat in tracked_chats:
+            chat_id = chat.chat_id
+            print(f"Проверка сообщений для чата: {chat_id}")
+
+            try:
+                entity = await telegram_manager.client.get_entity(chat_id)
+                chat_title = getattr(entity, 'title', 'Без названия')
+                print(f"Доступ к чату {chat_id} есть: {chat_title}")
+            except (ChatAdminRequiredError, UserNotParticipantError) as e:
+                error_message = f"[{datetime.now()}] Ошибка доступа к чату {chat_id}: {e}\n"
+                print(error_message.strip())
+                try:
+                    with open(error_log_path, "a") as file:
+                        file.write(error_message)
+                except Exception as log_error:
+                    print(f"Ошибка записи в лог файл: {log_error}")
+                continue
+
+            # Получаем последнее сообщение
+            last_message = await session.execute(
+                Message.__table__.select()
+                .where(Message.chat_id == chat_id)
+                .order_by(Message.message_id.desc())
+                .limit(1)
+            )
+            last_message = last_message.first()
+
+            # Обрабатываем корректно None
+            min_id = last_message.message_id + 1 if last_message else 0
+            print(f"Загрузка сообщений для чата {chat_id} начиная с ID: {min_id}")
+
+            messages = []
+
+            async def fetch_messages():
+                async for message in telegram_manager.client.iter_messages(
+                    chat_id, limit=MESSAGE_FETCH_LIMIT, min_id=min_id
+                ):
+                    messages.append(prepare_message_data(chat_id, message))
+
+            await telegram_manager.safe_call(fetch_messages)
+
+            if messages:
+                try:
+                    insert_stmt = pg_insert(Message).values(messages).on_conflict_do_nothing(
+                        index_elements=["unique_message"]
+                    )
+                    await session.execute(insert_stmt)
+                    print(f"Сообщения для чата {chat_id} успешно сохранены.")
+                except Exception as e:
+                    print(f"Ошибка сохранения сообщений для чата {chat_id}: {e}")
+
+        await session.commit()
+    except Exception as e:
+        print(f"Ошибка при загрузке недостающих сообщений: {e}")
+        await session.rollback()
+
+
+async def setup_message_handler(session):
+    """
+    Настраивает обработчик для отслеживания событий сообщений.
+    """
+    print("Запуск обработчиков сообщений")
+
+    @telegram_manager.client.on(events.NewMessage())
+    async def new_message_handler(event):
+        async with SessionLocal() as session:
+            try:
+                chat_id = event.chat_id
+                message = event.message
+                print(f"Новое сообщение из чата {chat_id}: {message.id}")
+
+                tracked_chat = await session.execute(
+                    TrackedChat.__table__.select().where(TrackedChat.chat_id == chat_id)
+                )
+                tracked_chat = tracked_chat.scalar_one_or_none()
+
+                if not tracked_chat:
+                    print(f"Чат {chat_id} не отслеживается. Игнорирование сообщения.")
+                    return
+
+                message_data = prepare_message_data(chat_id, message)
+                insert_stmt = pg_insert(Message).values(message_data).on_conflict_do_nothing(
+                    index_elements=["unique_message"]
+                )
+                await session.execute(insert_stmt)
+                await session.commit()
+                print(f"Сообщение {message.id} из чата {chat_id} успешно сохранено.")
+            except Exception as e:
+                print(f"Ошибка обработки нового сообщения: {e}")
+                await session.rollback()
+
+
+    @telegram_manager.client.on(events.MessageEdited())
+    async def message_edited_handler(event):
+        async with SessionLocal() as session:
+            try:
+                chat_id = event.chat_id
+                message = event.message
+
+                print(f"Изменено сообщение из чата {chat_id}: {message.id}")
+                unique_message = Message.generate_combined(chat_id, message.id)
+
+                # Корректный запрос для получения оригинального сообщения
+                original_message = await session.execute(
+                    select(Message).where(Message.unique_message == unique_message)
+                )
+                original_message = original_message.scalar_one_or_none()
+
+                if not original_message:
+                    print(f"Сообщение {unique_message} не найдено в базе. Добавляем как новое.")
+                    
+                    # Добавляем сообщение как новое, без записи об изменении
+                    new_message = Message(
+                        chat_id=chat_id,
+                        message_id=message.id,
+                        unique_message=unique_message,
+                        from_id=message.from_id,
+                        text=message.text,
+                        date=message.date,
+                        edit_date=message.edit_date,
+                        has_media=message.media is not None,
+                    )
+                    session.add(new_message)
+                    await session.commit()
+                    print(f"Новое сообщение {message.id} добавлено в базу.")
+                    return
+
+                # Сравниваем и обновляем данные только если сообщение существовало
+                old_text = original_message.text
+                new_text = message.text
+                has_media_changed = original_message.has_media != (message.media is not None)
+
+                if old_text == new_text and not has_media_changed:
+                    print(f"Изменений в тексте или медиа у сообщения {message.id} не найдено.")
+                    return
+
+                # Добавляем запись об изменении в MessageEdit
+                edit_record = MessageEdit(
+                    unique_message=unique_message,
+                    old_date=original_message.date,
+                    edit_date=message.edit_date or message.date,
+                    old_text=old_text,
+                    new_text=new_text,
+                    has_media_changed=has_media_changed
+                )
+                session.add(edit_record)
+
+                # Обновляем оригинальное сообщение
+                original_message.text = new_text
+                original_message.edit_date = message.edit_date or message.date
+                original_message.has_media = message.media is not None
+                session.add(original_message)
+
+                await session.commit()
+                print(f"Изменение сообщения {message.id} успешно сохранено.")
+            except Exception as e:
+                print(f"Ошибка обработки изменения сообщения: {e}")
+                await session.rollback()
+
+
+    @telegram_manager.client.on(events.MessageDeleted())
+    async def message_deleted_handler(event):
+        async with SessionLocal() as session:
+            try:
+                deleted_ids = event.deleted_ids
+                chat_id = event.chat_id
+
+                print(f"Удалены сообщения из чата {chat_id}: {deleted_ids}")
+                for message_id in deleted_ids:
+                    unique_message = Message.generate_combined(chat_id, message_id)
+
+                    # Получаем оригинальное сообщение
+                    original_message = await session.execute(
+                        select(Message).where(Message.unique_message == unique_message)
+                    )
+                    original_message = original_message.scalar_one_or_none()
+
+                    if not original_message:
+                        print(f"Сообщение {unique_message} не найдено в базе.")
+                        continue
+                    
+                    # Определяем локальную временную зону
+                    local_tz = get_localzone()
+                    # Получаем текущую дату и время в локальной зоне
+                    local_time = datetime.now(local_tz)
+                    # Определяем смещение от UTC
+                    utc_offset = local_time.utcoffset()
+                    
+                    # Добавляем запись в MessageEdit, чтобы зафиксировать удаление
+                    edit_record = MessageEdit(
+                        unique_message=unique_message,
+                        old_date=original_message.date,
+                        edit_date=datetime.utcnow().replace(microsecond=0) + utc_offset,  # Используем скорректированное время
+                        old_text=original_message.text,
+                        new_text="Сообщение удалено",  # Указываем, что сообщение удалено
+                        has_media_changed=original_message.has_media  # Сохраняем состояние медиа
+                    )
+                    session.add(edit_record)
+
+                await session.commit()
+                print(f"Обработка удаления сообщений {deleted_ids} завершена.")
+            except Exception as e:
+                print(f"Ошибка обработки удаления сообщения: {e}")
+                await session.rollback()
 
 
 
 
 
 
-
-
-
-
+###############################################################################
 
 
 

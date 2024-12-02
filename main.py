@@ -5,8 +5,12 @@ from fastapi.templating import Jinja2Templates
 import uvicorn
 import asyncio
 import os
-from todo.pyrog.tgbot import tg_router, telegram_manager, fetch_new_chats_periodically
+from todo.pyrog.tgbot import tg_router, telegram_manager, fetch_new_chats_periodically 
+from todo.pyrog.tgbot import fetch_missing_messages, setup_message_handler
 from todo.database.base import init_db, get_db
+from todo.database.base import SessionLocal  # Импорт существующей фабрики сессий
+
+
 from todo.models import initialize_database, handle_temp_table
 
 app = FastAPI()
@@ -32,6 +36,7 @@ app.include_router(tg_router)  # Включите router в ваше прило�
 
 
 
+
 @app.on_event("startup")
 async def on_startup():
     """
@@ -43,21 +48,27 @@ async def on_startup():
     # Старт Telegram клиента
     await telegram_manager.start()
 
-    # Создаем объект сессии из генератора
-    async def get_session():
-        async for session in get_db():
-            return session
+    # Работа с базой данных через сессию
+    async with SessionLocal() as session:
+        # Создание хранимой процедуры process_chat_data
+        await initialize_database(session)
 
-    session = await get_session()
+        # Работа с временной таблицей
+        await handle_temp_table(session)
 
-    # Создание хранимой процедуры process_chat_data
-    await initialize_database(session)
+        # Первоначальная загрузка недостающих сообщений
+        #await fetch_missing_messages(session)
 
-    # Работа с временной таблицей
-    await handle_temp_table(session)
+        # Настройка обработчика новых сообщений
+        #await setup_message_handler(session)
 
-    # Запускаем фоновую задачу для обновления чатов
-    asyncio.create_task(fetch_new_chats_periodically(session, interval=60))  # Интервал 60 секунд (1 минута)
+        # Передача сессии в фоновую задачу
+        asyncio.create_task(fetch_new_chats_periodically(session, interval=60))  # Интервал 60 секунд (1 минута)
+        print("запуск fetch_new_chats_periodically")
+
+
+
+
 
 
 
