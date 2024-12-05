@@ -10,15 +10,19 @@ from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
 from fastapi import Depends
 
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import joinedload
 from typing import List
 from sqlalchemy import update
+from sqlalchemy.sql.expression import update, delete
 from sqlalchemy.future import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.sql.expression import bindparam
 from sqlalchemy.sql import text
 from sqlalchemy.util import await_only
+from sqlalchemy.sql import func
+
 
 from sqlalchemy import insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -38,11 +42,11 @@ import asyncio
 import os
 import logging
 from fastapi import Request
+from sqlalchemy.exc import SQLAlchemyError
 
 # Настройка логирования
-logging.basicConfig(level=logging.ERROR)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 # Загрузка переменных из файла .env
 load_dotenv()
@@ -110,108 +114,55 @@ api_hash = os.getenv("API_HASH")
 session_name = "session_my_account"
 telegram_manager = TelegramClientManager(session_name, api_id, api_hash)
 
-
-
-
-
-
 client_data = {}
 
-BATCH_SIZE = 500  # Размер пакета
+###############################################################################
 
-async def process_chats_via_temp_table(db: AsyncSession, chat_data):
-    """
-    Обрабатывает чаты через временную таблицу и хранимую процедуру.
-    """
-    # Уникальное имя временной таблицы
-    temp_table_name = f"temp_chats_{int(datetime.utcnow().timestamp())}"
 
+async def sync_chats_with_db(session: AsyncSession, telegram_manager: TelegramClientManager):
+    """
+    Синхронизация чатов из Telegram с базой данных.
+    """
+    print("Начинается синхронизация чатов...")
     try:
-        # Создание временной таблицы
-        create_temp_table_query = text(f"""
-            CREATE TEMP TABLE {temp_table_name} (
-                chat_id BIGINT,
-                title TEXT,
-                is_title_changed BOOLEAN
-            ) ON COMMIT DROP;
-        """)
-        await db.execute(create_temp_table_query)
+        # Получение всех чатов из Telegram
+        dialogs = await telegram_manager.safe_call(telegram_manager.client.get_dialogs)
+        telegram_chats = {dialog.id: getattr(dialog, 'title', 'Без названия') for dialog in dialogs}
 
-        # Запись данных в временную таблицу пакетами
-        insert_query = text(f"""
-            INSERT INTO {temp_table_name} (chat_id, title, is_title_changed)
-            VALUES (:chat_id, :title, :is_title_changed)
-        """)
-        for i in range(0, len(chat_data), BATCH_SIZE):
-            batch = chat_data[i:i + BATCH_SIZE]
-            await db.execute(insert_query, batch)
+        # Загрузка всех chat_id и title из базы данных
+        existing_chats_query = await session.execute(select(Chat.chat_id, Chat.title))
+        existing_chats = {row.chat_id: row.title for row in existing_chats_query.fetchall()}
 
-        # Вызов хранимой процедуры
-        call_procedure_query = text(f"CALL process_chat_data('{temp_table_name}')")
-        await db.execute(call_procedure_query)
+        # Обновление существующих записей
+        for chat_id, new_title in telegram_chats.items():
+            if chat_id in existing_chats and existing_chats[chat_id] != new_title:
+                # Обновляем название чата
+                await session.execute(
+                    update(Chat)
+                    .where(Chat.chat_id == chat_id)
+                    .values(title=new_title, last_updated=datetime.utcnow())
+                )
+                print(f"Обновлено название чата: {existing_chats[chat_id]} -> {new_title} (ID: {chat_id})")
 
-        # Фиксация изменений
-        await db.commit()
-        logger.info(f"Данные успешно обработаны через временную таблицу {temp_table_name}.")
+        # Добавление новых записей
+        new_chats = [
+            Chat(chat_id=chat_id, title=title, last_updated=datetime.utcnow(), is_tracked=True)
+            for chat_id, title in telegram_chats.items()
+            if chat_id not in existing_chats
+        ]
+        if new_chats:
+            session.add_all(new_chats)
+            print(f"Добавлено новых чатов: {len(new_chats)}")
+
+        # Фиксация всех изменений
+        await session.commit()
+        print("Синхронизация чатов завершена.")
+
     except Exception as e:
-        logger.error(f"Ошибка при обработке временной таблицы {temp_table_name}: {e}")
-        await db.rollback()
+        await session.rollback()  # Откат транзакции при ошибке
+        print(f"Ошибка при синхронизации чатов: {e}")
+        raise
 
-
-async def fetch_new_chats_periodically(db: AsyncSession, interval: int = 60):
-    """
-    Периодически проверяет новые чаты и изменения существующих.
-    """
-    is_initial_run = True  # Флаг для первого запуска
-
-    while True:
-        try:
-            logger.info("Запуск проверки чатов...")
-            dialogs = []
-
-            # Получение всех чатов из Telegram через safe_call
-            async def fetch_dialogs():
-                async for dialog in telegram_manager.client.iter_dialogs():
-                    chat_id = dialog.id
-                    title = dialog.name or "Без названия"
-                    dialogs.append({"chat_id": chat_id, "title": title.strip()})
-            
-            await telegram_manager.safe_call(fetch_dialogs)
-
-            logger.info(f"Загружено {len(dialogs)} диалогов из Telegram.")
-
-            # Подготовка данных для временной таблицы
-            chat_data = []
-            for dialog in dialogs:
-                chat_id = dialog["chat_id"]
-                title = dialog["title"]
-
-                if not title:
-                    logger.warning(f"Пропущен диалог с chat_id: {chat_id}, так как отсутствует название.")
-                    continue
-
-                chat_data.append({
-                    "chat_id": chat_id,
-                    "title": title,
-                    "is_title_changed": False  # Значение обновится в хранимой процедуре
-                })
-
-            # Обработка через временную таблицу и хранимую процедуру
-            if chat_data:
-                logger.info(f"Обработка {len(chat_data)} чатов через временную таблицу.")
-                await process_chats_via_temp_table(db, chat_data)
-
-            logger.info("Проверка чатов завершена успешно.")
-
-            # После первого запуска сбросить флаг
-            if is_initial_run:
-                is_initial_run = False
-
-        except Exception as e:
-            logger.error(f"Ошибка при обновлении чатов: {e}")
-            await db.rollback()
-        finally:
-            await asyncio.sleep(interval)
 
 
 
@@ -471,14 +422,85 @@ async def setup_message_handler(session):
                 print(f"Ошибка обработки удаления сообщения: {e}")
                 await session.rollback()
 
+        # Обработчик событий ChatAction: добавление нового чата и обновление названия существующего.
+    
+    @telegram_manager.client.on(events.ChatAction())
+    async def handle_chat_action(event):
+        """
+        Обрабатывает события ChatAction: добавление нового чата и обновление названия существующего.
+        """
+        try:
+            chat_id = event.chat_id
+            new_title = event.chat.title if hasattr(event.chat, 'title') else None
+            if not new_title:
+                logger.warning(f"Название для чата {chat_id} отсутствует. Игнорирование.")
+                return
 
+            async with SessionLocal() as session:
+                try:
+                    # Проверяем, существует ли чат
+                    result = await session.execute(
+                        select(Chat).where(Chat.chat_id == chat_id)
+                    )
+                    chat = result.scalar_one_or_none()
 
+                    if not chat:
+                        # Чат не существует, добавляем как новый
+                        new_chat = Chat(
+                            chat_id=chat_id,
+                            title=new_title,
+                            is_tracked=False,  # Чат добавляется, но не отслеживается
+                            last_updated=func.now(),
+                            is_title_changed=False
+                        )
+                        session.add(new_chat)
+                        await session.flush()  # Обновляем сессию, чтобы получить id нового чата
+                        logger.info(f"Новый чат с ID {chat_id} и названием '{new_title}' добавлен.")
+                    else:
+                        # Чат существует, проверяем необходимость обновления названия
+                        if chat.title == new_title:
+                            logger.info(f"Название чата {chat_id} не изменилось.")
+                            return
 
+                        old_title = chat.title
+                        chat.title = new_title
+                        chat.last_updated = func.now()
+                        chat.is_title_changed = True
+                        is_tracked = chat.is_tracked
+                        logger.info(f"Название чата обновлено: {old_title} -> {new_title}")
 
+                    # Логирование переменных перед записью в историю
+                    logger.info(f"chat.id: {chat.id}")
+                    logger.info(f"old_title: {old_title}")
+                    logger.info(f"new_title: {new_title}")
+                    logger.info(f"is_title_changed: True")
+                    logger.info(f"is_tracked: {is_tracked}")
 
+                    # Сохранение изменения в истории
+                    history_record = ChatNameHistory(
+                        chat_id=chat.id,  # Используем id, а не chat_id
+                        old_title=old_title,
+                        new_title=new_title,
+                        is_title_changed=True,
+                        is_tracked=is_tracked
+                    )
+                    session.add(history_record)
+                    logger.info(f"Добавлена запись в историю для чата ID={chat.id}.")
+
+                    # Явный коммит для фиксации всех изменений
+                    await session.commit()
+                    logger.info(f"Изменения зафиксированы в базе данных для чата ID={chat.id}.")
+                except Exception as e:
+                    logger.error(f"Ошибка внутри транзакции: {e}")
+                    await session.rollback()
+                    raise
+
+        except SQLAlchemyError as e:
+            logger.error(f"Ошибка работы с базой данных: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка обработки события ChatAction: {e}")
+        
 ###############################################################################
-
-
 
 
 
